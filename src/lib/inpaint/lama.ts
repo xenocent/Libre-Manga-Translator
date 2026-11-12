@@ -15,11 +15,10 @@ import {
 } from "./constants";
 
 /**
- * LaMa shares the WASM thread with detection and OCR, and ONNX Runtime Web is
- * non-reentrant across sessions in one thread. Every other ORT subsystem joins
- * `sharedOrtTail` through createRunLock; LaMa was the sole exception, so a
- * second page's inpaint could start inside a running one and never settle -
- * which then wedges every later DETECT/OCR job queued behind it.
+ * LaMa owns an inference session just like detection/OCR/gate do. It serializes
+ * its own runs (same session is non-reentrant: "Session already started") but
+ * no longer shares a global tail with other subsystems, so a LaMa pass can
+ * proceed while detection or OCR runs.
  */
 const runExclusive = createRunLock("lama");
 
@@ -27,6 +26,11 @@ let session: ort.InferenceSession | null = null;
 let loadPromise: Promise<ort.InferenceSession | null> | null = null;
 let lastLamaError: string | null = null;
 let sessionWasmFallback = false;
+// LaMa owns an inference session just like detection/OCR/gate do. It serializes
+// its own runs (same session is non-reentrant: "Session already started") but
+// no longer shares a global tail with other subsystems, so a LaMa pass can
+// proceed while detection or OCR runs.
+const runExclusive = createRunLock("lama");
 
 export const lamaReady = (): boolean => !!session;
 export const getLastLamaError = (): string | null => lastLamaError;
@@ -87,7 +91,7 @@ function createLocalCanvas(w: number, h: number): HTMLCanvasElement | OffscreenC
   throw new Error("No canvas implementation available");
 }
 
-export async function renderLamaPatches(
+export async function renderLamaPatchesUnlocked(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   bboxes: Bbox[],
@@ -335,6 +339,17 @@ export async function renderLamaPatches(
   return settle(null);
 }
 
+/** Locked entry point: serializes LaMa's own runs against its session. */
+export async function renderLamaPatches(
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  bboxes: Bbox[],
+): Promise<LamaPatchResult> {
+  return runExclusive(() =>
+    renderLamaPatchesUnlocked(canvas, ctx, bboxes),
+  );
+}
+
 export async function ensureLama(): Promise<boolean> {
   if (session) return true;
   if (!loadPromise) {
@@ -488,7 +503,7 @@ function inRect(x: number, y: number, r: { x: number; y: number; w: number; h: n
  * Execute LaMa inpainting on the region.
  * Returns true if the model ran and rendered into page, false on decline / failure.
  */
-export async function renderLama(
+export async function renderLamaUnlocked(
   page: ImageData,
   fitted: Fitted,
 ): Promise<boolean> {
@@ -655,4 +670,12 @@ export async function renderLama(
   }
 
   return true;
+}
+
+/** Locked entry point: serializes LaMa's own runs against its session. */
+export async function renderLama(
+  page: ImageData,
+  fitted: Fitted,
+): Promise<boolean> {
+  return runExclusive(() => renderLamaUnlocked(page, fitted));
 }
