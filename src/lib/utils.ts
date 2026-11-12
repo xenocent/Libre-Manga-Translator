@@ -622,12 +622,27 @@ export interface RunLock {
 }
 
 /**
- * Shared global tail across all ONNX Runtime locks in the same JS context.
+ * Per-subsystem execution tails for ONNX Runtime locks.
+ *
  * ONNX Runtime Web's WASM backend is non-reentrant across sessions in the
- * same thread ("Session already started"), so all ORT subsystems share one
- * underlying execution chain while keeping per-subsystem dead-letter counters.
+ * same thread ("Session already started" is raised by the per-worker `$c`
+ * guard). That constraint is *per model runtime*, not per JS context: two
+ * different models (detection, OCR, gate, LaMa) are independent sessions and
+ * can run concurrently, while two runs of the *same* session must serialize.
+ *
+ * Each subsystem therefore gets its own tail. The map key is the subsystem
+ * name passed to `createRunLock`, so `detection` and `paddle-ocr` no longer
+ * block each other — a detect job and an OCR job proceed in parallel — while
+ * two detections still queue behind one another on the same detector session.
+ *
+ * `reset()` on any lock clears only that subsystem's tail, so a recovery hook
+ * cannot stall an unrelated stage.
  */
-let sharedOrtTail: Promise<unknown> = Promise.resolve();
+const ortTails = new Map<string, Promise<unknown>>();
+
+function tailFor(subsystem: string): Promise<unknown> {
+  return ortTails.get(subsystem) ?? Promise.resolve();
+}
 
 /**
  * FIFO promise serializer with dead-letter isolation.
@@ -652,19 +667,23 @@ export function createRunLock(subsystem = "core"): RunLock {
       }
       return task();
     };
-    const result = sharedOrtTail.then(run, run);
-    sharedOrtTail = result.catch((err) => {
-      // Cancellation is an expected outcome of a bounded job, not a fault.
-      if ((err as Error | undefined)?.name === "AbortError") return;
-      deadLetters++;
-      console.error(`[dead-letter:${subsystem}] (#${deadLetters}) Task rejected:`, err);
-    });
+    const tail = tailFor(subsystem);
+    const result = tail.then(run, run);
+    ortTails.set(
+      subsystem,
+      result.catch((err) => {
+        // Cancellation is an expected outcome of a bounded job, not a fault.
+        if ((err as Error | undefined)?.name === "AbortError") return;
+        deadLetters++;
+        console.error(`[dead-letter:${subsystem}] (#${deadLetters}) Task rejected:`, err);
+      }),
+    );
     return result;
   } as RunLock;
 
   lock.getDeadLetterCount = () => deadLetters;
   lock.reset = () => {
-    sharedOrtTail = Promise.resolve();
+    ortTails.delete(subsystem);
     deadLetters = 0;
   };
 

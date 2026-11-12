@@ -77,4 +77,64 @@ describe("createRunLock promise serialization & dead-letter handling", () => {
     lock.reset();
     expect(lock.getDeadLetterCount()).toBe(0);
   });
+
+  it("runs different subsystems concurrently (no cross-subsystem blocking)", async () => {
+    const detection = createRunLock("test-parallel-detection");
+    const ocr = createRunLock("test-parallel-ocr");
+    const order: string[] = [];
+
+    // A slow detection job must not hold back an OCR job on a different
+    // subsystem. Previously one shared tail serialized every stage.
+    const det = detection(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      order.push("detect");
+      return "d";
+    });
+    const ocrJob = ocr(async () => {
+      order.push("ocr");
+      return "o";
+    });
+
+    const [d, o] = await Promise.all([det, ocrJob]);
+    expect(d).toBe("d");
+    expect(o).toBe("o");
+    // OCR finished before the slow detection job, proving the tails are
+    // independent.
+    expect(order).toEqual(["ocr", "detect"]);
+  });
+
+  it("still serializes two runs of the same subsystem", async () => {
+    const lock = createRunLock("test-same-subsystem-serial");
+    const order: number[] = [];
+
+    const p1 = lock(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      order.push(1);
+    });
+    const p2 = lock(async () => {
+      order.push(2);
+    });
+
+    await Promise.all([p1, p2]);
+    expect(order).toEqual([1, 2]);
+  });
+
+  it("reset on one subsystem does not clear another subsystem's tail", async () => {
+    const a = createRunLock("test-reset-a");
+    const b = createRunLock("test-reset-b");
+    const order: string[] = [];
+
+    const aRun = a(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      order.push("a");
+    });
+    b.reset(); // must not disturb a's in-flight tail
+    const bRun = b(async () => {
+      order.push("b");
+    });
+
+    await Promise.all([aRun, bRun]);
+    expect(order).toContain("a");
+    expect(order).toContain("b");
+  });
 });
