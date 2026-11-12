@@ -18,7 +18,12 @@ function buildStamp(): string {
     execFileSync("git", args, { cwd: import.meta.dirname, encoding: "utf8" })
       .trim();
   try {
-    const dirty = git("status", "--porcelain") ? " dirty" : "";
+    // Only tracked modifications count. Untracked files here are scratch
+    // (`.work/`, local configs), and letting them mark every build "dirty"
+    // makes the stamp useless for telling two builds apart.
+    const dirty = git("status", "--porcelain", "--untracked-files=no")
+      ? " dirty"
+      : "";
     return ` (${git("rev-parse", "--short", "HEAD")}${dirty})`;
   } catch {
     // No git in a published tarball; the plain version still identifies it.
