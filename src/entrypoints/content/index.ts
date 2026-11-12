@@ -8,6 +8,7 @@ import { ShadowRootContentScriptUi, storage } from "#imports";
 import { getSiteRule, resolveActiveSiteRule } from "@/lib/adapters";
 import { DefaultConfig, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
 import { logDebugEntry, updateDebugEntry } from "./debug";
+import { recordProviderUsage } from "./provider-usage";
 import {
   createImageObservers,
   imageToBase64,
@@ -21,7 +22,7 @@ import {
   inpaintBbox,
   type MangaTargetElement,
 } from "./utils";
-import { getElementSrc } from "@/lib/canvas";
+import { getTargetSource } from "./target-source";
 import { maskUntranslated } from "@/lib/server/validator";
 import {
   isCleanResult,
@@ -48,6 +49,7 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
   return {
     rawResponse: d?.rawResponse,
     llmCalls: d?.llmCalls,
+    usage: d?.usage,
     finishReason: d?.finishReason,
     promptChars: d?.promptChars,
     padded: d?.padded,
@@ -198,7 +200,7 @@ export default defineContentScript({
 
     async function startTranslationPipeline(imgElement: MangaTargetElement) {
       if (!imgElement || !document.body.contains(imgElement)) return;
-      const rawSrc = getElementSrc(imgElement);
+      const rawSrc = getTargetSource(imgElement, true);
       if (!rawSrc) return;
       const clicked = srcKey(rawSrc);
       const originalSrc = (clicked && translatedSrcMap.get(clicked)) ?? rawSrc;
@@ -249,7 +251,7 @@ export default defineContentScript({
       // Compute full cacheKey early for strict block on pending cacheKey
       let pendingCacheKey: string | undefined;
       try {
-        pendingCacheKey = await Registry.resolveCacheKey(imgElement, originalSrc);
+        pendingCacheKey = await Registry.resolveCacheKey(originalSrc);
         if (Registry.getStatusByCacheKey(pendingCacheKey) === "pending") {
           Registry.markIdle(originalSrc);
           return;
@@ -305,19 +307,9 @@ export default defineContentScript({
         }
       }
 
-        const translationKey = async () => {
-          const { seriesName, chapterId, pageIndex } = await getSiteRule();
-          const resolvedPage = resolveImagePageIndex(
-            imgElement,
-            originalSrc,
-            pageIndex,
-          );
-          const targetLang =
-            (await storage.getItem<string>("sync:target-lang")) ??
-            DefaultConfig.targetLang;
-          const imgHash = quickHash(originalSrc);
-          return `page-cache-${targetLang}-${seriesName}-${chapterId}-p${resolvedPage}-${imgHash}`;
-        };
+        // One implementation of page identity, shared with the registry's
+        // in-flight claim, so the cache and the guard agree on "this page".
+        const translationKey = () => Registry.resolveCacheKey(originalSrc);
 
         const rect = imgElement.getBoundingClientRect();
         const naturalW = "naturalWidth" in imgElement ? imgElement.naturalWidth : imgElement.width;
@@ -325,7 +317,33 @@ export default defineContentScript({
         const scaleX = rect.width / (naturalW || 1);
         const scaleY = rect.height / (naturalH || 1);
 
+        // Slider readers recycle ONE <img> element and only change its src, so
+        // a second pipeline can start while the previous page's overlay still
+        // wraps that same element. Wrapping it again steals the live image out
+        // of the running overlay, and that overlay's cleanup steals it back —
+        // which is why a painted page disappeared after two or three slides.
+        // Close the stale overlay first: onRemove unwraps the image and
+        // releases the registry claim it was holding.
+        const recycled = imgElement.parentElement;
+        if (recycled?.dataset.lmtWrapper === "1") {
+          for (const [staleSrc, entry] of overlays) {
+            if (entry.wrapper !== recycled) continue;
+            console.warn(
+              "LMT: reader recycled the image element; closing the previous overlay for",
+              staleSrc.slice(0, 120),
+            );
+            try {
+              entry.ui.remove();
+            } catch (err) {
+              console.warn("LMT: stale overlay cleanup failed:", err);
+              overlays.delete(staleSrc);
+            }
+            break;
+          }
+        }
+
         const wrapper = document.createElement("div");
+        wrapper.dataset.lmtWrapper = "1";
         wrapper.style.cssText = `position:relative;display:inline-block;width:${rect.width}px;height:${rect.height}px;`;
         imgElement.insertAdjacentElement("beforebegin", wrapper);
         wrapper.appendChild(imgElement);
@@ -357,15 +375,41 @@ export default defineContentScript({
                 rawImageUrl: src,
 
                 getTranslationCache: async () => {
-                  const cache = await storage.getItem<PageCache>(
-                    `local:${await translationKey()}`,
-                  );
+                  const cacheKey = await translationKey();
+                  let cache = await storage.getItem<PageCache>(cacheKey);
+                  if (!cache) {
+                    // Same page under a key this build no longer produces
+                    // (older formats carried an ordinal page index). Copy it
+                    // forward once so paid-for text is reachable again.
+                    const legacy = await Registry.findLegacyPageCache(originalSrc);
+                    if (legacy) {
+                      cache = legacy;
+                      await storage
+                        .setItem<PageCache>(cacheKey, legacy)
+                        .catch((err) =>
+                          console.warn("LMT: cache adoption failed:", err),
+                        );
+                      console.log(
+                        "LMT: adopted a page cache left under an older key",
+                      );
+                    }
+                  }
                   if (!cache) return;
-                  const translatedSrc = await repaintWithTranslations(
-                    src,
-                    cache.bboxes,
-                    cache.translations,
-                  );
+                  // cleanedSrc is this very page already inpainted. Painting
+                  // over the raw src instead made every cache restore pay for a
+                  // full LaMa run, which is what a scroll-back felt like a
+                  // re-translation.
+                  const translatedSrc = cache.cleanedSrc
+                    ? await drawTranslations(
+                        cache.cleanedSrc,
+                        cache.bboxes,
+                        cache.translations,
+                      )
+                    : await repaintWithTranslations(
+                        src,
+                        cache.bboxes,
+                        cache.translations,
+                      );
                   translatedSrcMap.set(srcKey(translatedSrc), originalSrc);
                   return {
                     bboxes: cache.bboxes,
@@ -532,6 +576,14 @@ export default defineContentScript({
 
                   const duration = performance.now() - t0;
 
+                  void recordProviderUsage(
+                    curMode,
+                    resp?.diagnostics,
+                    curMode === "gemini" ? debugCtx.geminiModel : debugCtx.serverModel,
+                  ).catch((err) =>
+                    console.warn("LMT: usage counter write failed:", err),
+                  );
+
                   if (resp?.error) {
                     if (!opts?.transient) {
 
@@ -660,22 +712,31 @@ export default defineContentScript({
                     })
                     .catch((err) => console.warn("LMT: debug-log write failed:", err));
 
-                  // only a fully translated page may write cache or
-                  // context. A padded/echoed page keeps its debug entry (that
-                  // is the whole point of the log) but must not poison the
-                  // next prompt or resurrect echoed lines from cache.
-                  if (isCleanResult(diagnostics)) {
-                    const cacheKey = await translationKey();
-                    storage
-                      .setItem<PageCache>(`local:${cacheKey}`, {
-                        bboxes,
-                        // Persist the paintable set so a cache hit cannot
-                        // resurrect an echoed source line.
-                        translations: visibleTranslations,
-                        sourceTexts,
-                      })
-                      .catch((err) => console.warn("LMT: page-cache persist failed:", err));
+                  // The page cache records what the model actually answered
+                  // for these pixels, echoed boxes blanked. Writing it whenever
+                  // a page got a response is what keeps a refresh from paying
+                  // for the same request again; only the *series context* stays
+                  // gated, because that is the part an echoed page can poison
+                  // for the next chapter (LMT-026).
+                  const cacheKey = await translationKey();
+                  try {
+                    await storage.setItem<PageCache>(cacheKey, {
+                      bboxes,
+                      // Persist the paintable set so a cache hit cannot
+                      // resurrect an echoed source line.
+                      translations: visibleTranslations,
+                      sourceTexts,
+                    });
+                  } catch (err) {
+                    console.warn("LMT: page-cache persist failed:", err);
+                  }
+                  // Awaited on purpose: renderTranslations re-reads this key
+                  // to merge in `cleanedSrc`. Left floating, that read often
+                  // found nothing, so the inpainted page was never persisted
+                  // and every later visit re-ran LaMa instead of only
+                  // drawing text.
 
+                  if (isCleanResult(diagnostics)) {
                     updateSeriesContext(
                       seriesName,
                       chapterId,
@@ -689,7 +750,7 @@ export default defineContentScript({
                     console.warn(
                       `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es) on ${
                         seriesName ? `"${seriesName}" ` : ""
-                      }page ${resolvedPage}; cache/context not saved.`,
+                      }page ${resolvedPage}; painted as far as the model answered, series context not updated.`,
                     );
                   }
                   }
@@ -813,20 +874,18 @@ export default defineContentScript({
                   translatedSrcMap.set(srcKey(translatedSrc), originalSrc);
 
                   // Persist edited translations and bboxes so cache re-open shows them
-                  const cache = await storage.getItem<PageCache>(
-                    `local:${await translationKey()}`,
-                  );
-                  if (cache) {
-                    await storage.setItem<PageCache>(
-                      `local:${await translationKey()}`,
-                      {
-                        ...cache,
-                        translations,
-                        bboxes,
-                        cleanedSrc: cached?.url,
-                      },
-                    );
-                  }
+                  const cacheKey = await translationKey();
+                  const cache = await storage.getItem<PageCache>(cacheKey);
+                  // Written even when the read came back empty: `cleanedSrc` is
+                  // the only record of the inpainted base, and without it the
+                  // next visit must run LaMa over this page again.
+                  await storage.setItem<PageCache>(cacheKey, {
+                    ...cache,
+                    bboxes,
+                    translations,
+                    sourceTexts: cache?.sourceTexts,
+                    cleanedSrc: cached?.url,
+                  });
 
                   return translatedSrc;
                 },
@@ -922,8 +981,7 @@ export default defineContentScript({
             domObserver.disconnect();
             sizeObserver.disconnect();
 
-            const currentImg = wrapper.querySelector("img");
-            if (currentImg) wrapper.replaceWith(currentImg);
+            if (wrapper.contains(imgElement)) wrapper.replaceWith(imgElement);
             else wrapper.remove();
           },
         }).then((ui) => {
@@ -938,6 +996,33 @@ export default defineContentScript({
             childList: true,
             subtree: true,
           });
+        }).catch((err: unknown) => {
+          // The pipeline claimed the registry at markPending above and the
+          // queue holds a slot until it sees done/idle. If the UI never mounts
+          // there is no Overlay to emit either, so release it here or the
+          // queue stops dispatching pages for the rest of the tab's life.
+          console.error("LMT: overlay setup failed:", err);
+          const partial = overlays.get(originalSrc);
+          if (partial) {
+            try {
+              // onRemove unwraps the image and marks idle itself.
+              partial.ui.remove();
+              return;
+            } catch (cleanupErr) {
+              console.warn("LMT: partial overlay cleanup failed:", cleanupErr);
+              overlays.delete(originalSrc);
+            }
+          }
+          styleObserver.disconnect();
+          domObserver.disconnect();
+          sizeObserver.disconnect();
+          if (wrapper.contains(imgElement)) wrapper.replaceWith(imgElement);
+          else if (wrapper.isConnected) wrapper.remove();
+          try {
+            Registry.markIdle(originalSrc, pendingCacheKey);
+          } catch {
+            Registry.markIdle(originalSrc);
+          }
         });
     }
 
@@ -966,7 +1051,7 @@ export default defineContentScript({
               autoTranslator.enqueueManual(img);
             },
             getOverlayMode: (img: MangaTargetElement) => {
-              const raw = getElementSrc(img);
+              const raw = getTargetSource(img, true);
               const originalSrc = translatedSrcMap.get(srcKey(raw)) ?? raw;
               const overlay = overlays.get(originalSrc);
               if (!overlay) return "idle";
@@ -976,7 +1061,7 @@ export default defineContentScript({
               return "idle";
             },
             getOverlayProgress: (img: MangaTargetElement) => {
-              const raw = getElementSrc(img);
+              const raw = getTargetSource(img, true);
               const originalSrc = translatedSrcMap.get(srcKey(raw)) ?? raw;
               const overlay = overlays.get(originalSrc);
               return (
@@ -985,7 +1070,7 @@ export default defineContentScript({
               );
             },
             isSameSource: (img: MangaTargetElement, src: string) => {
-              const raw = getElementSrc(img);
+              const raw = getTargetSource(img, true);
               const originalSrc = translatedSrcMap.get(srcKey(raw)) ?? raw;
               return originalSrc === src || raw === src;
             },

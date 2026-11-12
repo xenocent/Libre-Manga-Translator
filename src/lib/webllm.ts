@@ -2,6 +2,7 @@ import type { MLCEngine } from "@mlc-ai/web-llm";
 import { DefaultConfig, normalizeLlmModel } from "./configs";
 import { createLlmEngine } from "./llm-engine";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "./prompts";
+import { normalizeOpenAICompatibleUsage } from "./server/usage";
 import {
   attachDiagnostics,
   clipRawResponse,
@@ -270,6 +271,7 @@ async function runLLMModel(
     if (!content) {
       throw new Error("Local LLM returned empty response");
     }
+    const usage = normalizeOpenAICompatibleUsage(reply);
 
     // WebLLM reports OpenAI-style `finish_reason`; "length" means the answer hit
     // `max_tokens` and was cut, which the Debug export must show (LMT-032).
@@ -277,6 +279,7 @@ async function runLLMModel(
       rawResponse: clipRawResponse(content),
       finishReason: reply.choices[0]?.finish_reason,
       promptChars: promptChars(systemPrompt, userPrompt),
+      ...(usage ? { usage } : {}),
     };
 
     try {

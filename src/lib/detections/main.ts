@@ -17,6 +17,7 @@ export const UNKNOWN_DETECTION_MODEL_MESSAGE = (model: string) =>
 
 async function loadDetectionSession(
   model: string,
+  signal?: AbortSignal,
 ): Promise<ort.InferenceSession> {
   // Detection has its own GPU toggle (LMT-028): turning recognition off must
   // not silently force the detector to CPU.
@@ -26,7 +27,7 @@ async function loadDetectionSession(
       DefaultConfig.rtdetrModelRepo,
       "detector-v4-s_int8.onnx",
       false,
-      { gpu },
+      { gpu, signal },
     )) as ort.InferenceSession;
   }
 
@@ -34,7 +35,7 @@ async function loadDetectionSession(
     return await downloadArtifactFromUrl(
       DefaultConfig.comicTextDetectorUrl,
       "comic-text-detector",
-      { gpu },
+      { gpu, signal },
     );
   }
 
@@ -57,6 +58,7 @@ export async function detectTextBubble(
   imageSrc: string,
   minConfidence: number = DefaultConfig.detectionMinConfidence,
   requestedModel: string = DefaultConfig.detectionModels[0].id,
+  signal?: AbortSignal,
 ): Promise<Bbox[]> {
   // Defensive: ensure valid detection model id at the gate.
   requestedModel = normalizeDetectionModel(requestedModel);
@@ -72,22 +74,28 @@ export async function detectTextBubble(
     }
 
     if (!session) {
-      session = await loadDetectionSession(requestedModel);
+      const loadedSession = await loadDetectionSession(requestedModel, signal);
+      if (signal?.aborted) {
+        await loadedSession.release().catch(() => undefined);
+        signal.throwIfAborted();
+      }
+      session = loadedSession;
       currentModelName = requestedModel;
     }
 
     if (!session) throw new Error("Detection session uninitialized");
+    signal?.throwIfAborted();
     await yieldToMain();
 
     if (requestedModel === "comic-bubble") {
       clearSegmentation();
-      return await runRtDetrDetection(session, imageSrc, minConfidence);
+      return await runRtDetrDetection(session, imageSrc, minConfidence, signal);
     } else if (requestedModel === "comic-text-detector") {
-      return await runComicTextDetection(session, imageSrc, minConfidence);
+      return await runComicTextDetection(session, imageSrc, minConfidence, signal);
     } else {
       throw new Error(UNKNOWN_DETECTION_MODEL_MESSAGE(requestedModel));
     }
-  });
+  }, signal);
 
   await yieldToMain();
   return result;

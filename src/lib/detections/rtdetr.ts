@@ -140,8 +140,10 @@ export async function runRtDetrDetection(
   session: ort.InferenceSession,
   imageSrc: string,
   minConfidence = 0.35,
+  signal?: AbortSignal,
 ): Promise<Bbox[]> {
-  const bitmap = await fetchAsImageBitmap(imageSrc);
+  signal?.throwIfAborted();
+  const bitmap = await fetchAsImageBitmap(imageSrc, signal);
   const origWidth = bitmap.width;
   const origHeight = bitmap.height;
 

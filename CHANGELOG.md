@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.0.5 (unreleased) — November 2026
+
+Translation queue reliability, metered-request caching, and Gemini backoff. Fixes the class of failures where the pipeline stopped answering *at all* and kept charging for work it had already done.
+
+### Added
+
+- **Queue progress readout:** a small always-visible `active / in-flight+queued / completed` chip sits above the settings gear, covering both auto-translate and multi-page manual use. `completed` counts pages settled in the current document, including pages restored from cache, so it tells you how much of the chapter is already paid for. It is a fixed corner readout rather than something that pops over the artwork.
+- **Older cache records are adopted:** a page cached under a previous key format (which carried an ordinal page index) is copied forward on the first miss instead of being re-translated. Records are probed by exact name; enumerating `storage.local` would have pulled every cached page — each a multi-megabyte data URL — into memory.
+- **Cache identity test coverage:** `src/entrypoints/content/page-identity.ts` holds page identity as a pure, DOM-free module, asserted by `tests/unit/page-cache-key.test.ts` across signed-URL re-issues, trailing slashes, language, chapter and page separation, and query-as-identity URLs.
+
+### Changed
+
+- **Page cache identity is the reader URL plus the pixels.** It previously included the site rule's `seriesName`, which for any site without a community rule falls back to a regex over `document.title`. Readers rewrite the title while they load, so the same page could land under a different key on every refresh and pay again for a translation already in storage. A signed image URL (`…/0007.jpg?token=…`) now hashes to its path, since the signature is re-issued per load.
+- **A page is cached as soon as the model answers,** not only when every box translated. The fully-clean predicate (`LMT-026`) now gates only the *series context* update, which is the part an echoed page can actually poison; the page record keeps echoed boxes blank so a cache hit repaints exactly what was shown live. One unanswered bubble out of twelve no longer discards text the user paid for.
+- **`cleanedSrc` is persisted even when the preceding cache read comes back empty.** It is the only record of the inpainted base, and losing it forced a full LaMa pass on every later visit to a page whose text was already translated.
+- **One implementation of page identity,** shared by the storage cache and the registry's in-flight claim. They were computed separately and had to be kept matching by hand.
+
+### Fixed
+
+- **Queue slots could leak permanently, wedging every later translation.** Slots are held for the full pipeline lifetime and released on the registry's `done`/`idle` events. A throw inside overlay init, or a rejection in the `createShadowRootUi` chain (an MV3 port closing before its response), released nothing — so after three such pages, further requests queued behind phantom jobs forever. Both paths now settle the claim and tear the half-mounted overlay down.
+- **A stuck overlay reported "translating" over a dead pipeline.** `mode` initialises to `loading` and the wrapper publishes it as the pill state; every early return left it there, so the spinner never cleared and the queue counted the page as still claimed. Failures now move it to a visible error state.
+- **Detection and inpaint ignored their job budget,** so a stalled stage never answered. The offscreen relay received `timeoutMs` and dropped it: `sendResponse` was never called, the content script waited on a reply that would not come, and the shared inference queue kept the head of the line with it — which is how one page could hang for more than ten minutes with the LLM result already in hand. Both handlers now race their work against the deadline and reply within it.
+- **A cancelled page kept spending inference that nobody was waiting for.** The ONNX run lock refuses to start a queued task whose job deadline already fired, and the LaMa cluster loop and the Fast ladder's region loop check the signal at each boundary. ONNX Runtime Web offers no abort hook for a run in progress, so this is the only cancellation available — but it is the one that matters, because it frees the queue for the pages behind.
+- **Gemini rate limits had no retry or backoff.** A `429` surfaced as a status-less `Error`, so nothing retried and free-tier users lost the request. The Gemini path now classifies retryable statuses, honours Google's `RetryInfo` interval when the API supplies one, and retries within a configurable budget (`geminiMaxRetries`, default 1) — reusing the helpers that previously only covered the self-hosted API path.
+- **Slider readers wiped painted pages after two or three slides.** Such readers recycle one `<img>` element and only change its `src`, so a second pipeline could steal the live image out of the overlay that was wrapping it, and that overlay's cleanup would steal it back. The previous overlay is now closed before the element is re-wrapped.
+- **Concurrent LaMa runs could wedge the shared ONNX tail.** All inference now serializes through one execution chain per context (the WASM backend is non-reentrant: "Session already started"), with the session and tensors captured before the locked closure and a single WebGPU→WASM rebuild retry per run.
+
+### Technical
+
+- `version_name` now carries a build stamp (`1.0.5 (b67d8a3 dirty)`), shown by `chrome://extensions` and the sidebar footer. Chrome's `version` field only accepts dotted numbers, so it cannot distinguish an unpacked build from the store build of the same release, or a stale unpacked build from a rebuilt one.
+- `createRunLock` accepts an optional `AbortSignal` and excludes `AbortError` from its dead-letter count, so a cancelled job is not logged as a fault.
+- `untilDeadline`, `jobDeadline` and `throwIfAborted` are shared primitives for bounded offscreen jobs; the translation branch already used a per-backend deadline and now detection and inpaint do too.
+- Known limitation for reviewers: the OCR engines' internal run locks do not take the job signal yet, so an expired job can still start an OCR pass. It always receives a reply now, so it cannot hang — the remaining cost is wasted compute, not a stall. True page-to-page parallelism needs an inference-layer change (a session set per worker, or leasing sessions per job), not just a higher concurrency number.
+
+Validation: `bun run check` (0 errors, 0 warnings), `bun run test:unit` (207 pass), all self-check scripts, and `bun run build`.
+
 ## v1.0.4 — November 2026
 
 Firefox compatibility enhancements, canvas support for manga readers, improved overlay interaction, and reliability fixes across the translation pipeline.

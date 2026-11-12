@@ -75,6 +75,8 @@ interface TranslationDiagnostics {
   rawResponse?: string;
   /** LLM requests spent on this page (format fallbacks + correction round). */
   llmCalls?: number;
+  /** Token counts returned by the provider; missing fields are not inferred. */
+  usage?: import("./src/lib/server/usage").ProviderTokenUsage;
   /** Provider stop reason; "length"/"MAX_TOKENS" means the answer was cut. */
   finishReason?: string;
   /** Characters sent: system prompt + user prompt. */
@@ -113,6 +115,8 @@ interface DebugEntry {
   rawResponse?: string;
   /** LLM requests spent on this page. */
   llmCalls?: number;
+  /** Token counts returned by the provider; missing fields are not inferred. */
+  usage?: import("./src/lib/server/usage").ProviderTokenUsage;
   /** Provider stop reason; "length" means the answer was cut. */
   finishReason?: string;
   /** Characters sent: system prompt + user prompt. */

@@ -138,20 +138,78 @@ function timedOutError(
   return timeout;
 }
 
+/**
+ * Answers at the deadline for stages whose work cannot be interrupted.
+ *
+ * Detection, OCR and inpaint run on ONNX sessions that expose no abort hook,
+ * so `jobDeadline`'s signal alone cannot stop them: the promise simply never
+ * settles, `sendResponse` is never called, and the content script waits on a
+ * reply that will not come (`sharedOrtTail` keeps the queue head too, so every
+ * later page queues behind it). Racing the work at least turns an unbounded
+ * hang into the bounded, visible error the budget was written to produce.
+ */
+function untilDeadline<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: unknown,
+  stage: string,
+): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const settle = (fn: () => void) => {
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const onAbort = () =>
+      settle(() =>
+        reject(
+          new DOMException(
+            `Timed out after ${Math.round(Number(timeoutMs) / 1000)}s: ${stage}`,
+            "AbortError",
+          ),
+        ),
+      );
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort);
+    work.then(
+      (value) => settle(() => resolve(value)),
+      (err) => settle(() => reject(err)),
+    );
+  });
+}
+
 browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
   if (msg.type === "OFFSCREEN_DETECT_BBOX") {
     const { detectionModel, detectionMinConfidence } = msg.config;
+    const stage = stageName(msg.type);
+    const deadline = jobDeadline(msg.timeoutMs, stage);
 
-    (async () => {
+    const detection = (async () => {
       // The toggles are read here, not only on GPU_STATE_CHANGED: a page
       // translated before the user ever opens Settings must already honour
       // them (LMT-028).
       await ensureGpuState();
       await yieldToMain();
-      return detectTextBubble(msg.data, detectionMinConfidence, detectionModel);
-    })()
-      .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
+      return detectTextBubble(
+        msg.data,
+        detectionMinConfidence,
+        detectionModel,
+        deadline.signal,
+      );
+    })();
+
+    untilDeadline(detection, deadline.signal, msg.timeoutMs, stage)
+      .then((res) => {
+        deadline.dispose();
+        sendResponse(res);
+      })
+      .catch((err) =>
+        sendResponse(
+          errorResponse(
+            timedOutError(err, deadline.signal, msg.timeoutMs, stage),
+          ),
+        ),
+      );
 
     return true;
   }
@@ -492,7 +550,11 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
 
     // "quality": standalone LaMa-first pass with Fast fallback per region.
     // Anything else normalizes to the Fast ladder (no model rung).
-    (async () => {
+    const stage = stageName(msg.type);
+    const deadline = jobDeadline(msg.timeoutMs, stage);
+
+    const inpaint = (async () => {
+      const opts = { segmentation, alwaysInpaint, signal: deadline.signal };
       // LaMa is the only model on the Quality path; its GPU toggle is read
       // inside `ensureLama()`, but the persisted state must be loaded before
       // that call can resolve it (LMT-028).
@@ -518,15 +580,26 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           try {
             await storage.setItem("sync:inpaint-method", "fast");
           } catch {}
-          return inpaintImageAuto(src, bboxes, { segmentation, alwaysInpaint });
+          return inpaintImageAuto(src, bboxes, opts);
         }
       }
       return method === "quality"
-        ? inpaintImageQuality(src, bboxes, { segmentation, alwaysInpaint })
-        : inpaintImageAuto(src, bboxes, { segmentation, alwaysInpaint });
-    })()
-      .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
+        ? inpaintImageQuality(src, bboxes, opts)
+        : inpaintImageAuto(src, bboxes, opts);
+    })();
+
+    untilDeadline(inpaint, deadline.signal, msg.timeoutMs, stage)
+      .then((res) => {
+        deadline.dispose();
+        sendResponse(res);
+      })
+      .catch((err) =>
+        sendResponse(
+          errorResponse(
+            timedOutError(err, deadline.signal, msg.timeoutMs, stage),
+          ),
+        ),
+      );
 
     return true;
   }

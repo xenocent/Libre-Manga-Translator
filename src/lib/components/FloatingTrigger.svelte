@@ -30,6 +30,7 @@
   let status = $state<"idle" | "translating" | "translated">("idle");
   let progressText = $state("Detecting text…");
   let targetImg = $state<MangaTargetElement | null>(null);
+  let targetSource = "";
   // Pipeline-active image shown without hover (manual click optimistic or
   // auto-queue). Hover takes over while hovering; pointer-leave snaps back.
   let autoImg = $state<MangaTargetElement | null>(null);
@@ -156,7 +157,7 @@
   }
 
   function srcMatches(el: MangaTargetElement, src: string) {
-    return isSameSource?.(el, src) ?? getElementSrc(el) === src;
+    return isSameSource?.(el, src) ?? getElementSrc(el, true) === src;
   }
 
   function queryMode(img: MangaTargetElement) {
@@ -169,11 +170,19 @@
   // the pill back to Translate (then hide on pointer-out).
   function adoptMode(img: MangaTargetElement) {
     const q = queryMode(img);
-    const src = getElementSrc(img);
+    const src = getElementSrc(img, true);
+    const pending = !!src && isRegistryPending(src);
+    const sourceChanged = img === targetImg && src !== targetSource;
+    if (sourceChanged) {
+      targetSource = src;
+      progressText = "Detecting text…";
+      status = pending ? "translating" : "idle";
+      if (!pending && autoImg === img) autoImg = null;
+    }
     if (q === "translating") {
       status = q;
       progressText = getOverlayProgress?.(img) ?? "Translating…";
-    } else if (status !== "translating" || !src || !isRegistryPending(src)) {
+    } else if (status !== "translating" || !pending) {
       status = q;
     }
     return q;
@@ -222,6 +231,11 @@
     // re-hover should preserve the user's drag position.
     const switched = targetImg !== img;
     targetImg = img;
+    if (switched) {
+      targetSource = getElementSrc(img, true);
+      progressText = "Detecting text…";
+      status = targetSource && isRegistryPending(targetSource) ? "translating" : "idle";
+    }
     if (auto) autoImg = img;
     if (switched && !isDraggingTrigger) dragOffset = null;
     updatePosition();
@@ -269,7 +283,7 @@
     if (!document.body.contains(img)) return false;
     if (queryMode(img) === "translating") return true;
     try {
-      const src = getElementSrc(img);
+      const src = getElementSrc(img, true);
       return src ? isRegistryPending(src) : false;
     } catch {
       return false;
@@ -360,13 +374,32 @@
     // rAF handle for debounced indirect mapping — coalesces rapid
     // mouseover events that don't land directly on img/canvas.
     let indirectRaf = 0;
+    let canvasRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function scheduleTargetRefresh() {
+      if (!targetImg) return;
+      if (canvasRefreshTimer) clearTimeout(canvasRefreshTimer);
+      canvasRefreshTimer = setTimeout(() => {
+        canvasRefreshTimer = null;
+        const img = targetImg;
+        if (!img || !document.body.contains(img)) return;
+        if (img instanceof HTMLCanvasElement) getElementSrc(img, true);
+        adoptMode(img);
+        if ((hoverImg === img || autoImg === img) && isInViewport(img)) {
+          visible = true;
+          updatePosition();
+        }
+      }, 160);
+    }
 
     function applyHoverTarget(el: MangaTargetElement) {
       hoverImg = el;
       cancelHide();
       if (targetImg !== el) {
+        if (el instanceof HTMLCanvasElement) getElementSrc(el, true);
         showFor(el, false);
       } else {
+        if (el instanceof HTMLCanvasElement) getElementSrc(el, true);
         visible = true;
         adoptMode(el);
       }
@@ -479,6 +512,7 @@
     // hovered or pipeline-pinned — never for stale indirect mappings.
     let scrollRaf = 0;
     function handleScrollRaw() {
+      scheduleTargetRefresh();
       if (!targetImg) return;
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
@@ -518,11 +552,14 @@
     }
 
     function handleProgress(e: Event) {
-      if (targetImg) {
-        const customEvent = e as CustomEvent<{ message?: string }>;
-        if (customEvent.detail?.message) {
-          progressText = customEvent.detail.message;
-        }
+      if (!targetImg) return;
+      const customEvent = e as CustomEvent<{ src?: string; message?: string }>;
+      if (
+        customEvent.detail?.src &&
+        customEvent.detail.message &&
+        srcMatches(targetImg, customEvent.detail.src)
+      ) {
+        progressText = customEvent.detail.message;
       }
     }
 
@@ -563,6 +600,13 @@
 
     document.addEventListener("mouseover", handleMouseOver, { passive: true });
     document.addEventListener("mouseout", handleMouseOut, { passive: true });
+    document.addEventListener("click", scheduleTargetRefresh, true);
+    document.addEventListener("keydown", scheduleTargetRefresh, true);
+    document.addEventListener("wheel", scheduleTargetRefresh, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("touchend", scheduleTargetRefresh, true);
     window.addEventListener("resize", handleScrollRaw, { passive: true });
     // Capture on document: `scroll` does not bubble, and many readers (Sunday
     // Webry included) scroll an inner container — window-only listeners never
@@ -575,12 +619,20 @@
     return () => {
       document.removeEventListener("mouseover", handleMouseOver);
       document.removeEventListener("mouseout", handleMouseOut);
+      document.removeEventListener("click", scheduleTargetRefresh, true);
+      document.removeEventListener("keydown", scheduleTargetRefresh, true);
+      document.removeEventListener("wheel", scheduleTargetRefresh, true);
+      document.removeEventListener("touchend", scheduleTargetRefresh, true);
       window.removeEventListener("resize", handleScrollRaw);
       document.removeEventListener("scroll", handleScrollRaw, true);
       document.removeEventListener("lmt:mode-change", handleModeChange);
       document.removeEventListener("lmt:progress", handleProgress);
       document.removeEventListener("lmt:translation-status", handleTranslationStatus);
       cancelHide();
+      if (canvasRefreshTimer) {
+        clearTimeout(canvasRefreshTimer);
+        canvasRefreshTimer = null;
+      }
       if (indirectRaf) { cancelAnimationFrame(indirectRaf); indirectRaf = 0; }
       if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0; }
     };

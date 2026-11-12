@@ -1,6 +1,30 @@
 import { defineConfig } from "wxt";
 import tailwindcss from "@tailwindcss/vite";
+import { execFileSync } from "node:child_process";
 import pkg from "./package.json";
+
+/**
+ * Display-only build stamp, carried in `version_name`.
+ *
+ * Chrome's `version` field accepts dotted numbers only, so it cannot say which
+ * commit a build came from - and the same number can be installed twice at once
+ * (store build plus unpacked build, or yesterday's unpacked build never
+ * reloaded). `version_name` has no format constraint, is capped at 32 chars, and
+ * is what both `chrome://extensions` and the in-app footer render when present.
+ */
+function buildStamp(): string {
+  // Fixed argv, no shell: metacharacters in a path or hook cannot reroute it.
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: import.meta.dirname, encoding: "utf8" })
+      .trim();
+  try {
+    const dirty = git("status", "--porcelain") ? " dirty" : "";
+    return ` (${git("rev-parse", "--short", "HEAD")}${dirty})`;
+  } catch {
+    // No git in a published tarball; the plain version still identifies it.
+    return "";
+  }
+}
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
@@ -14,7 +38,7 @@ export default defineConfig({
 
   manifest: ({ browser }) => ({
     name: "Libre Manga Translator",
-    version_name: pkg.version,
+    version_name: `${pkg.version}${buildStamp()}`,
     description: "Free Privacy-focused AI manga translator: local WebGPU, Gemini cloud, or self-hosted LLM",
     permissions: [
       "activeTab",

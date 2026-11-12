@@ -20,6 +20,7 @@ import {
   expectedClassesForSource,
   type ScriptClass,
 } from "../gate/charset";
+import { mergeProviderUsage, type ProviderTokenUsage } from "./usage";
 
 export type TranslationValidationCode =
   | "NOT_OBJECT"
@@ -93,6 +94,8 @@ export interface LlmRunInfo {
   promptChars?: number;
   /** LLM requests spent on this page (format fallbacks + correction round). */
   llmCalls?: number;
+  /** Token counts reported by the provider; omitted fields remain unknown. */
+  usage?: ProviderTokenUsage;
 }
 
 /** Raw answers are capped before they reach storage: 50 debug entries × a
@@ -137,6 +140,7 @@ export function isTruncatedFinishReason(
 export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
   if (calls.length === 0) return {};
   const last = calls[calls.length - 1];
+  const usage = mergeProviderUsage(calls.map((call) => call.usage));
   return {
     rawResponse: last.rawResponse,
     finishReason: last.finishReason,
@@ -144,6 +148,7 @@ export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
     // longer and would overstate what a normal page costs.
     promptChars: calls[0].promptChars,
     llmCalls: calls.length,
+    ...(usage ? { usage } : {}),
   };
 }
 
@@ -302,6 +307,7 @@ export function validateTranslationResult(
             finishReason: run.finishReason,
             promptChars: run.promptChars,
             llmCalls: run.llmCalls,
+            ...(run.usage ? { usage: run.usage } : {}),
             truncated: isTruncatedFinishReason(run.finishReason),
             // This validator never invents entries; the flag exists so the
             // Debug export can prove that in one line (LMT-032).

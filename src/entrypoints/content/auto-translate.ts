@@ -1,19 +1,23 @@
 import { resolveActiveSiteRule, type SiteRule } from "@/lib/adapters";
 import { storage } from "#imports";
 import * as Registry from "./translation-registry";
-import { getElementSrc, type MangaTargetElement } from "@/lib/canvas";
+import { queryScopedTargets } from "./auto-translate-targets";
+import { getTargetSource } from "./target-source";
+import type { MangaTargetElement } from "@/lib/canvas";
 
 export type TranslateFn = (img: MangaTargetElement) => Promise<void>;
 
 export const MANUAL_CONCURRENCY = 3;
 
 export class AutoTranslateQueue {
-  private queue: { img: MangaTargetElement; fn: TranslateFn }[] = [];
+  private queue: { img: MangaTargetElement; fn: TranslateFn; key: string }[] = [];
   // Slots are held for the full pipeline lifetime and released on the
   // registry `lmt:translation-status` done/idle events — NOT when
   // translateFn settles (it resolves right after overlay mount, long
   // before detect/translate/inpaint finish).
   private inFlight = new Set<string>();
+  private activeTargets = new WeakSet<MangaTargetElement>();
+  private inFlightTargets = new Map<string, MangaTargetElement>();
   private concurrency = 1;
   private seenKeys = new Set<string>();
   private lastTranslateFn: TranslateFn | null = null;
@@ -36,10 +40,18 @@ export class AutoTranslateQueue {
       }
       if (!this.inFlight.has(k)) return;
       this.inFlight.delete(k);
+      this.releaseTarget(k);
       // done → keep seenKeys so finished pages never requeue.
       if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
     };
     document.addEventListener("lmt:translation-status", this.statusListener);
+  }
+
+  private releaseTarget(k: string) {
+    const target = this.inFlightTargets.get(k);
+    if (!target) return;
+    this.inFlightTargets.delete(k);
+    this.activeTargets.delete(target);
   }
 
   destroy() {
@@ -66,12 +78,16 @@ export class AutoTranslateQueue {
   }
 
   evict(img: MangaTargetElement) {
-    const src = getElementSrc(img);
+    const src = getTargetSource(img, true);
     if (!src) return;
     const k = Registry.srcKeyOf(src);
     this.seenKeys.delete(k);
-    if (this.inFlight.delete(k) && this.lastTranslateFn) {
+    const wasInFlight = this.inFlight.delete(k);
+    if (wasInFlight) this.releaseTarget(k);
+    if (wasInFlight && this.lastTranslateFn) {
       this.drain(this.lastTranslateFn);
+    } else {
+      this.publish();
     }
   }
 
@@ -79,7 +95,7 @@ export class AutoTranslateQueue {
     img: MangaTargetElement,
     translateFn: (img: MangaTargetElement) => Promise<void>,
   ) {
-    const src = getElementSrc(img);
+    const src = getTargetSource(img, true);
     if (!src) return;
     const k = Registry.srcKeyOf(src);
     if (
@@ -91,24 +107,40 @@ export class AutoTranslateQueue {
     )
       return;
     this.seenKeys.add(k);
-    this.queue.push({ img, fn: translateFn });
+    this.queue.push({ img, fn: translateFn, key: k });
     this.lastTranslateFn = translateFn;
     this.drain(translateFn);
   }
 
+  /** Powers the queue readout beside the settings gear. */
+  private publish() {
+    Registry.setQueueCounts(this.inFlight.size, this.queue.length);
+  }
+
   private drain(translateFn: (img: MangaTargetElement) => Promise<void>) {
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
-      const entry = this.queue.shift()!;
+      const nextIndex = this.queue.findIndex(
+        (item) => !this.activeTargets.has(item.img),
+      );
+      if (nextIndex < 0) break;
+      const [entry] = this.queue.splice(nextIndex, 1);
       const targetImg = entry.img;
-      const src = getElementSrc(targetImg);
+      const src = getTargetSource(targetImg, true);
       if (!src || !document.body.contains(targetImg)) {
         // Skip detached images without consuming a slot
-        if (src) this.seenKeys.delete(Registry.srcKeyOf(src));
+        this.seenKeys.delete(entry.key);
         continue;
       }
       // Strict registry guard at drain time as well (covers race between enqueue and drain)
       const k = Registry.srcKeyOf(src);
+      if (k !== entry.key) {
+        this.seenKeys.delete(entry.key);
+        if (this.seenKeys.has(k)) continue;
+        this.seenKeys.add(k);
+        entry.key = k;
+      }
       if (Registry.isPending(k) || this.inFlight.has(k)) {
+        this.seenKeys.delete(k);
         continue;
       }
       if (Registry.getStatus(k) === "done") {
@@ -117,12 +149,15 @@ export class AutoTranslateQueue {
       }
 
       this.inFlight.add(k);
+      this.activeTargets.add(targetImg);
+      this.inFlightTargets.set(k, targetImg);
       // Fire-and-forget: translateFn sets up its own overlay and async
       // flow. Failure or done signals through the registry event above.
       translateFn(targetImg)
         .then(() => {
           if (!Registry.isPending(k) && Registry.getStatus(k) !== "done") {
             this.inFlight.delete(k);
+            this.releaseTarget(k);
             this.seenKeys.delete(k);
             Registry.markIdle(src);
             if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
@@ -131,19 +166,21 @@ export class AutoTranslateQueue {
         .catch((err) => {
           console.warn("LMT: auto-translate task failed:", err);
           this.inFlight.delete(k);
+          this.releaseTarget(k);
           this.seenKeys.delete(k);
           Registry.markIdle(src);
           if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
         });
     }
+    this.publish();
   }
 
   clear() {
     for (const entry of this.queue) {
-      const src = getElementSrc(entry.img);
-      if (src) this.seenKeys.delete(Registry.srcKeyOf(src));
+      this.seenKeys.delete(entry.key);
     }
     this.queue = [];
+    this.publish();
   }
 
   get length() {
@@ -161,10 +198,29 @@ export class AutoTranslateOrchestrator {
   private mutationObserver: MutationObserver | null = null;
   private queue = new AutoTranslateQueue();
   private observedImages = new WeakSet<MangaTargetElement>();
+  private observedSourceKeys = new WeakMap<MangaTargetElement, string>();
   private activeRule: SiteRule | null = null;
   private translateFn: ((img: MangaTargetElement) => Promise<void>) | null = null;
   private unwatchStorage: (() => void) | null = null;
   private unwatchConcurrency: (() => void) | null = null;
+  private pageRescanTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private scheduleReaderRescan = (event: Event) => {
+    if (!this.isEnabled) return;
+    const target = event.target;
+    if (
+      event.type === "keydown" &&
+      target instanceof HTMLElement &&
+      target.closest("input, textarea, [contenteditable='true']")
+    ) {
+      return;
+    }
+    if (this.pageRescanTimer) clearTimeout(this.pageRescanTimer);
+    this.pageRescanTimer = setTimeout(() => {
+      this.pageRescanTimer = null;
+      this.scanAndObserve(true);
+    }, 160);
+  };
 
   async init(translateFn: (img: MangaTargetElement) => Promise<void>) {
     this.translateFn = translateFn;
@@ -249,25 +305,52 @@ export class AutoTranslateOrchestrator {
     this.mutationObserver = new MutationObserver((mutations) => {
       if (!this.isEnabled) return;
       let shouldScan = false;
+      let refreshCanvases = false;
       for (const m of mutations) {
         if (m.addedNodes.length > 0) {
           shouldScan = true;
-          break;
+        }
+        if (m.type === "attributes") {
+          shouldScan = true;
+          refreshCanvases ||= m.target instanceof HTMLCanvasElement;
         }
       }
       if (shouldScan) {
-        this.scanAndObserve();
+        this.scanAndObserve(refreshCanvases);
       }
     });
 
     this.mutationObserver.observe(document.body, {
       childList: true,
       subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "srcset", "data-src", "data-page", "width", "height"],
+    });
+
+    document.addEventListener("click", this.scheduleReaderRescan, true);
+    document.addEventListener("keydown", this.scheduleReaderRescan, true);
+    document.addEventListener("wheel", this.scheduleReaderRescan, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("touchend", this.scheduleReaderRescan, true);
+    document.addEventListener("scroll", this.scheduleReaderRescan, {
+      capture: true,
+      passive: true,
     });
   }
 
   stop() {
     this.isEnabled = false;
+    document.removeEventListener("click", this.scheduleReaderRescan, true);
+    document.removeEventListener("keydown", this.scheduleReaderRescan, true);
+    document.removeEventListener("wheel", this.scheduleReaderRescan, true);
+    document.removeEventListener("touchend", this.scheduleReaderRescan, true);
+    document.removeEventListener("scroll", this.scheduleReaderRescan, true);
+    if (this.pageRescanTimer) {
+      clearTimeout(this.pageRescanTimer);
+      this.pageRescanTimer = null;
+    }
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
@@ -280,6 +363,7 @@ export class AutoTranslateOrchestrator {
     // Fresh WeakSet so a restart rescan re-observes dropped pages.
     // In-flight pipelines keep their registry slots and finish normally.
     this.observedImages = new WeakSet();
+    this.observedSourceKeys = new WeakMap();
   }
 
   destroy() {
@@ -318,11 +402,28 @@ export class AutoTranslateOrchestrator {
   }
 
   private observeImage(img: MangaTargetElement) {
-    if (this.observedImages.has(img)) return;
-    const src = getElementSrc(img);
+    this.observeImageWithRefresh(img, false);
+  }
+
+  private observeImageWithRefresh(
+    img: MangaTargetElement,
+    refreshCanvas: boolean,
+  ) {
+    const src = getTargetSource(img, refreshCanvas);
     if (!src) return;
     const k = Registry.srcKeyOf(src);
-    if (Registry.isPending(k) || Registry.getStatus(k) === "done") return;
+    const previousKey = this.observedSourceKeys.get(img);
+    if (previousKey === k && this.observedImages.has(img)) return;
+    if (previousKey && previousKey !== k) {
+      this.observer?.unobserve(img);
+      this.observedImages.delete(img);
+    }
+
+    if (Registry.isPending(k) || Registry.getStatus(k) === "done") {
+      this.observedSourceKeys.set(img, k);
+      this.observedImages.add(img);
+      return;
+    }
 
     const isReady =
       img instanceof HTMLCanvasElement
@@ -330,46 +431,68 @@ export class AutoTranslateOrchestrator {
         : img.complete && img.naturalWidth > 0;
 
     if (isReady) {
+      this.observedSourceKeys.set(img, k);
+      this.observedImages.add(img);
       if (this.isQualifyingImage(img)) {
-        this.observedImages.add(img);
         this.observer?.observe(img);
       }
     } else if (img instanceof HTMLImageElement) {
+      if (previousKey === k) return;
+      this.observedSourceKeys.set(img, k);
       const onLoad = () => {
         img.removeEventListener("load", onLoad);
         if (!this.isEnabled) return;
-        const kk = Registry.srcKeyOf(getElementSrc(img));
-        if (Registry.isPending(kk) || Registry.getStatus(kk) === "done") return;
-        if (this.isQualifyingImage(img)) {
-          this.observedImages.add(img);
-          this.observer?.observe(img);
-        }
+        this.observedSourceKeys.delete(img);
+        this.observedImages.delete(img);
+        this.observeImage(img);
       };
       img.addEventListener("load", onLoad, { once: true });
     }
   }
 
-  private scanAndObserve() {
+  private isNearViewport(img: MangaTargetElement): boolean {
+    const rect = img.getBoundingClientRect();
+    const margin = 200;
+    return (
+      rect.bottom >= -margin &&
+      rect.right >= -margin &&
+      rect.top <= window.innerHeight + margin &&
+      rect.left <= window.innerWidth + margin
+    );
+  }
+
+  private scanAndObserve(refreshVisibleCanvases = false) {
     if (!this.isEnabled) return;
 
     if (this.activeRule?.imageSelector) {
-      const root = this.activeRule.containerSelector
-        ? document.querySelector(this.activeRule.containerSelector) ?? document
-        : document;
-
-      try {
-        const matchingImgs = root.querySelectorAll<MangaTargetElement>(
-          this.activeRule.imageSelector,
-        );
-        matchingImgs.forEach((img) => this.observeImage(img));
-        if (matchingImgs.length > 0) return;
-      } catch {
-        // Fall back to generic scan if rule query fails
-      }
+      const matchingImgs = queryScopedTargets(
+        document,
+        this.activeRule.containerSelector,
+        this.activeRule.imageSelector,
+      ).filter(
+        (img): img is MangaTargetElement =>
+          img instanceof HTMLImageElement || img instanceof HTMLCanvasElement,
+      );
+      matchingImgs.forEach((img) =>
+        this.observeImageWithRefresh(
+          img,
+          refreshVisibleCanvases &&
+            img instanceof HTMLCanvasElement &&
+            this.isNearViewport(img),
+        ),
+      );
+      if (matchingImgs.length > 0) return;
     }
 
     // Fallback scan across all document images & canvases
     const allImages = document.querySelectorAll<MangaTargetElement>("img, canvas");
-    allImages.forEach((img) => this.observeImage(img));
+    allImages.forEach((img) =>
+      this.observeImageWithRefresh(
+        img,
+        refreshVisibleCanvases &&
+          img instanceof HTMLCanvasElement &&
+          this.isNearViewport(img),
+      ),
+    );
   }
 }

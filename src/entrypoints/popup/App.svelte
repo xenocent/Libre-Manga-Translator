@@ -28,6 +28,7 @@
   import InpaintSettings from "@/lib/components/settings/InpaintSettings.svelte";
   import SiteRulesSettings from "@/lib/components/settings/SiteRulesSettings.svelte";
   import GpuAccelerationPanel from "@/lib/components/settings/GpuAccelerationPanel.svelte";
+  import UsageSummary from "@/lib/components/settings/UsageSummary.svelte";
 
   let {
     hostname = "",
@@ -507,6 +508,10 @@
           </div>
         {/if}
       </section>
+
+      {#if currentMode === "api" || currentMode === "gemini"}
+        <UsageSummary mode={currentMode} />
+      {/if}
 
       <!-- ── SECTION 2: Language Matrix ── -->
       <section class="panel-card !p-2 flex flex-col gap-1.5 relative">

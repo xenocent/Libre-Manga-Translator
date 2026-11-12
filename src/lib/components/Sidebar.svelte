@@ -28,7 +28,9 @@ import { onDestroy } from "svelte";
   import ModelStorageSettings from "./settings/ModelStorageSettings.svelte";
   import ModelUpdateChecker from "./settings/ModelUpdateChecker.svelte";
   import GpuAccelerationPanel from "./settings/GpuAccelerationPanel.svelte";
+  import UsageSummary from "./settings/UsageSummary.svelte";
   import { getSiteRule } from "@/lib/adapters";
+  import type { QueueProgress } from "@/entrypoints/content/translation-registry";
   import {
     loadSeriesContext,
     resetSeriesContext,
@@ -37,6 +39,19 @@ import { onDestroy } from "svelte";
 
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
+
+  let queue = $state<QueueProgress>({ active: 0, queued: 0, completed: 0 });
+  $effect(() => {
+    const onProgress = (e: Event) => {
+      const detail = (e as CustomEvent<QueueProgress>).detail;
+      if (detail) queue = { ...detail };
+    };
+    document.addEventListener("lmt:queue-progress", onProgress, {
+      passive: true,
+    });
+    return () =>
+      document.removeEventListener("lmt:queue-progress", onProgress);
+  });
   const manifestVersion = (browser.runtime.getManifest() as any).version_name || browser.runtime.getManifest().version;
 
   let currentMode = $state(DefaultConfig.currentMode);
@@ -406,7 +421,7 @@ import { onDestroy } from "svelte";
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   role="presentation"
-  class="fixed bottom-6 right-6 z-99999 font-sans pointer-events-auto"
+  class="fixed bottom-6 right-6 z-99999 font-sans pointer-events-auto flex flex-col items-end gap-1.5"
   onmousedown={(e) => e.stopPropagation()}
   onpointerdown={(e) => e.stopPropagation()}
   onclick={(e) => {
@@ -414,6 +429,16 @@ import { onDestroy } from "svelte";
     e.preventDefault();
   }}
 >
+  <div
+    class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl"
+    title={`${queue.active} translating · ${queue.queued} queued · ${queue.completed} done and cached on this page`}
+  >
+    <span class="text-[var(--accent-cyan)]">{queue.active}</span>
+    <span> / </span>
+    <span>{queue.active + queue.queued}</span>
+    <span> / </span>
+    <span class="text-[var(--accent-amber)]">{queue.completed}</span>
+  </div>
   <button
     type="button"
     onclick={(e) => {
@@ -633,6 +658,7 @@ import { onDestroy } from "svelte";
               bind:autoTranslate
               bind:concurrency={autoTranslateConcurrency}
             />
+            <UsageSummary mode={currentMode === "gemini" ? "gemini" : currentMode === "api" ? "api" : "webgpu"} />
           </div>
         {/if}
 

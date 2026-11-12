@@ -1,4 +1,4 @@
-import { fetchAsImageBitmap, yieldToMain } from "../utils";
+import { fetchAsImageBitmap, throwIfAborted, yieldToMain } from "../utils";
 import { teleaInpaint } from "./telea";
 import {
   buildInkSeed,
@@ -68,6 +68,8 @@ export interface InpaintAutoResult {
 export interface InpaintAutoOptions {
   segmentation?: Uint8Array | null;
   alwaysInpaint?: boolean;
+  /** Job budget signal; checked at every region/cluster boundary. */
+  signal?: AbortSignal;
 }
 
 interface PageRect {
@@ -394,6 +396,9 @@ async function paintFastRegions(
   const regions: InpaintRegionResult[] = [];
 
   for (const i of indexes) {
+    // A fired budget means the caller threw this result away; keep painting
+    // would only starve the pages queued behind whose output still counts.
+    throwIfAborted(options?.signal, "fast ladder");
     await yieldToMain();
     const prep = prepareRegion(
       page,
@@ -573,7 +578,7 @@ export async function inpaintImageQuality(
     return { url: canvas.toDataURL("image/png"), regions: [] };
   }
 
-  const lama = await renderLamaPatches(canvas, ctx, bboxes);
+  const lama = await renderLamaPatches(canvas, ctx, bboxes, options?.signal);
 
   if (lama.uncovered.length === 0) {
     return {

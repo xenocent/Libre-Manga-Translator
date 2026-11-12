@@ -78,4 +78,25 @@ describe("detector preprocessing contracts", () => {
     expect(comictext).toMatch(/mergeTiledBoxes\(/);
     expect(comictext).toMatch(/mergeSegmentationTile\(/);
   });
+
+  it("propagates the detection deadline through model and image I/O", () => {
+    const sharedUtils = read("../../src/lib/utils.ts");
+    const detection = read("../../src/lib/detections/main.ts");
+
+    expect(sharedUtils).toMatch(
+      /awaitWithAbort\(inFlightRequests\.get\(url\)!,\s*signal\)/,
+    );
+    expect(sharedUtils).toMatch(
+      /awaitWithAbort\(\s*fetch\(url,\s*signal\s*\?\s*\{\s*signal\s*\}\s*:\s*undefined\),\s*signal,\s*\)/,
+    );
+    expect(detection).toMatch(/loadDetectionSession\(requestedModel,\s*signal\)/);
+    expect(detection).toMatch(
+      /runRtDetrDetection\(session,\s*imageSrc,\s*minConfidence,\s*signal\)/,
+    );
+    expect(detection).toMatch(
+      /runComicTextDetection\(session,\s*imageSrc,\s*minConfidence,\s*signal\)/,
+    );
+    expect(rtdetr).toMatch(/fetchAsImageBitmap\(imageSrc,\s*signal\)/);
+    expect(comictext).toMatch(/fetchAsImageBitmap\(imageSrc,\s*signal\)/);
+  });
 });

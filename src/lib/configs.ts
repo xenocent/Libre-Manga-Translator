@@ -101,6 +101,8 @@ export const DefaultConfig = {
   },
   serverMaxRetries: 1,
   serverRetryDelayMs: 2000,
+  geminiMaxRetries: 1,
+  geminiRetryDelayMs: 2000,
 
   // Per-job execution budgets (ms) for work forwarded to the offscreen
   // document (LMT-010 / LMT-027). The offscreen document owns the clock and

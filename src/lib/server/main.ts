@@ -6,6 +6,7 @@ import {
   type ResponseFormatMode,
   type ServerConfig,
 } from "./schemas";
+import { normalizeOpenAICompatibleUsage } from "./usage";
 import {
   attachDiagnostics,
   clipRawResponse,
@@ -81,7 +82,7 @@ function isAbortError(error: unknown): boolean {
  * 4xx means the request itself is wrong (auth, model name, unsupported
  * response_format), 429 is rate limiting, and 5xx is the server's problem.
  */
-function isRetryableRequestError(error: unknown): boolean {
+export function isRetryableRequestError(error: unknown): boolean {
   if (isNonRetryable(error)) return false;
   if (isAbortError(error)) return false;
   const status = (error as Error & { status?: number } | undefined)?.status;
@@ -90,7 +91,7 @@ function isRetryableRequestError(error: unknown): boolean {
 }
 
 /** Sleep that gives up immediately when the job is cancelled. */
-function delayUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
+export function delayUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
@@ -194,6 +195,7 @@ async function requestOnce(
       finishReason:
         typeof finishReason === "string" ? finishReason : undefined,
       promptChars: promptChars(systemPrompt, userPrompt),
+      usage: normalizeOpenAICompatibleUsage(data),
     };
 
     try {

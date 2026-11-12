@@ -34,13 +34,23 @@ export function sniffMime(bytes: Uint8Array): string {
   return "image/jpeg";
 }
 
-export async function fetchAsImageBitmap(url: string): Promise<ImageBitmap> {
-  const response = await fetch(url);
+export async function fetchAsImageBitmap(
+  url: string,
+  signal?: AbortSignal,
+): Promise<ImageBitmap> {
+  throwIfAborted(signal, "image fetch");
+  const response = await fetch(url, signal ? { signal } : undefined);
   const arrayBuffer = await response.arrayBuffer();
+  throwIfAborted(signal, "image decode");
   const bytes = new Uint8Array(arrayBuffer);
   const mime = sniffMime(bytes);
   const blob = new Blob([arrayBuffer], { type: mime });
-  return createImageBitmap(blob);
+  const bitmap = await createImageBitmap(blob);
+  if (signal?.aborted) {
+    bitmap.close();
+    throwIfAborted(signal, "image decode");
+  }
+  return bitmap;
 }
 
 export function arrayBufferToBase64DataUrl(buf: ArrayBuffer): string {
@@ -75,26 +85,66 @@ const inFlightRequests = new Map<
   Promise<ort.InferenceSession | Response | undefined>
 >();
 
+function awaitWithAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(
+      signal.reason ?? new DOMException("Aborted", "AbortError"),
+    );
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 export function downloadArtifactHF(
   repoID: string,
   path: `${string}.onnx`,
   noReturn?: boolean,
-  options?: { gpu?: boolean },
+  options?: { gpu?: boolean; signal?: AbortSignal },
 ): Promise<ort.InferenceSession>;
 
 export function downloadArtifactHF(
   repoID: string,
   path: string,
   noReturn?: boolean,
-  options?: { gpu?: boolean },
+  options?: { gpu?: boolean; signal?: AbortSignal },
 ): Promise<Response>;
 
 export async function downloadArtifactHF(
   repoID: string,
   path: string,
   noReturn?: boolean,
-  options?: { gpu?: boolean },
+  options?: { gpu?: boolean; signal?: AbortSignal },
 ): Promise<ort.InferenceSession | Response | undefined> {
+  const signal = options?.signal;
+  throwIfAborted(signal, "model download");
   const isDirectUrl =
     path.startsWith("http://") ||
     path.startsWith("https://") ||
@@ -110,25 +160,33 @@ export async function downloadArtifactHF(
   const cacheName = isDirectUrl ? "direct-model-cache" : repoID;
 
   if (inFlightRequests.has(url)) {
-    const result = await inFlightRequests.get(url);
+    const result = await awaitWithAbort(inFlightRequests.get(url)!, signal);
     return result instanceof Response ? result.clone() : result;
   }
 
   const requestPromise = (async () => {
-    const cache = await caches.open(cacheName);
+    const cache = await awaitWithAbort(caches.open(cacheName), signal);
 
     // Cache-first: silent per-load update checks were removed. Updates are
     // manual via CHECK_MODEL_UPDATES / UPDATE_CACHED_MODEL (updates.ts).
-    let response = await cache.match(url);
+    let response = await awaitWithAbort(cache.match(url), signal);
 
     if (!response) {
-      const fetched = await fetch(url);
+      const fetched = await awaitWithAbort(
+        fetch(url, signal ? { signal } : undefined),
+        signal,
+      );
+      throwIfAborted(signal, "model download");
       if (!fetched.ok) throw new Error(`Failed to download model from ${url} (${fetched.status} ${fetched.statusText})`);
-      const buffer = await fetched.arrayBuffer();
+      const buffer = await awaitWithAbort(fetched.arrayBuffer(), signal);
 
       const expectedSha256 = getExpectedSha256(path, url);
       if (expectedSha256) {
-        const isValid = await verifyBufferSha256(buffer, expectedSha256);
+        const isValid = await awaitWithAbort(
+          verifyBufferSha256(buffer, expectedSha256),
+          signal,
+        );
+        throwIfAborted(signal, "model integrity check");
         if (!isValid) {
           await cache.delete(url).catch(() => {});
           throw new Error(`Integrity check failed: SHA-256 mismatch for ${path}`);
@@ -140,9 +198,10 @@ export async function downloadArtifactHF(
         status: fetched.status,
         statusText: fetched.statusText,
       });
-      await cache.put(url, response.clone());
+      await awaitWithAbort(cache.put(url, response.clone()), signal);
     }
 
+    throwIfAborted(signal, "model load");
     if (noReturn) return;
 
     if (path.endsWith(".onnx") || url.endsWith(".onnx") || url.includes(".onnx?")) {
@@ -150,23 +209,35 @@ export async function downloadArtifactHF(
       const providers = resolveExecutionProvidersForModel(modelIdentifier, options?.gpu);
       // Copy bytes per attempt: a failed create() may neuter the buffer,
       // so the WASM retry gets fresh bytes, not a detached view.
-      const modelBytes = new Uint8Array(await response.arrayBuffer());
+      const modelBytes = new Uint8Array(
+        await awaitWithAbort(response.arrayBuffer(), signal),
+      );
       try {
         const session = await ort.InferenceSession.create(modelBytes.slice().buffer, {
           executionProviders: providers,
         });
+        if (signal?.aborted) {
+          await session.release().catch(() => undefined);
+          throwIfAborted(signal, "model session create");
+        }
         // One line per session is the only place the effective provider is
         // visible: the toggles are spread over four loaders, and ORT exposes
         // no public `.providers` to read it back afterwards (LMT-028).
         console.info(`[ort] ${modelIdentifier} → ${providers.join("+")}`);
         return session;
       } catch (err: any) {
+        throwIfAborted(signal, "model session create");
         if (providers.includes("webgpu")) {
           console.warn(`[ort] WebGPU session creation failed for ${modelIdentifier}, falling back to WASM:`, err?.message);
           console.info(`[ort] ${modelIdentifier} → wasm (webgpu create failed)`);
-          return await ort.InferenceSession.create(modelBytes.slice().buffer, {
+          const fallbackSession = await ort.InferenceSession.create(modelBytes.slice().buffer, {
             executionProviders: ["wasm"],
           });
+          if (signal?.aborted) {
+            await fallbackSession.release().catch(() => undefined);
+            throwIfAborted(signal, "WASM fallback session create");
+          }
+          return fallbackSession;
         }
         throw err;
       }
@@ -188,7 +259,7 @@ export async function downloadArtifactHF(
 export async function downloadArtifactFromUrl(
   url: string,
   cacheKey: string = "direct-model-cache",
-  options?: { gpu?: boolean },
+  options?: { gpu?: boolean; signal?: AbortSignal },
 ): Promise<ort.InferenceSession> {
   const res = await downloadArtifactHF(cacheKey, url, false, options);
   return res as unknown as ort.InferenceSession;
@@ -519,6 +590,21 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
+ * Cancellation point for loops that drive non-abortable work (ONNX runs,
+ * per-region inpaint). A job whose budget expired must stop taking slices
+ * immediately, otherwise its remaining pages sit at the head of the shared
+ * inference queue and starve every later page behind a result nobody wants.
+ */
+export function throwIfAborted(
+  signal: AbortSignal | undefined,
+  where: string,
+): void {
+  if (signal?.aborted) {
+    throw new DOMException(`Cancelled at ${where}`, "AbortError");
+  }
+}
+
+/**
  * Cooperative time-slicing. Yields event loop to pending UI tasks (e.g. extension popup clicks).
  * Uses native `scheduler.yield()` when available (Chromium 115+), falling back to `setTimeout(0)`.
  */
@@ -530,7 +616,7 @@ export async function yieldToMain(): Promise<void> {
 }
 
 export interface RunLock {
-  <T>(task: () => Promise<T>): Promise<T>;
+  <T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   getDeadLetterCount(): number;
   reset(): void;
 }
@@ -551,11 +637,25 @@ let sharedOrtTail: Promise<unknown> = Promise.resolve();
 export function createRunLock(subsystem = "core"): RunLock {
   let deadLetters = 0;
 
-  const lock = function runExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const lock = function runExclusive<T>(
+    task: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     // ponytail: unbounded queue; upgrade to bounded semaphore if memory spikes under burst.
-    const run = () => task();
+    const run = () => {
+      // A job whose deadline already fired must not START. ONNX Web offers no
+      // abort hook for a run in progress, so this pre-flight check is the only
+      // cancellation available - and it is what stops an abandoned page from
+      // spending inference that every later page then queues behind.
+      if (signal?.aborted) {
+        throw new DOMException(`Cancelled before start (${subsystem})`, "AbortError");
+      }
+      return task();
+    };
     const result = sharedOrtTail.then(run, run);
     sharedOrtTail = result.catch((err) => {
+      // Cancellation is an expected outcome of a bounded job, not a fault.
+      if ((err as Error | undefined)?.name === "AbortError") return;
       deadLetters++;
       console.error(`[dead-letter:${subsystem}] (#${deadLetters}) Task rejected:`, err);
     });

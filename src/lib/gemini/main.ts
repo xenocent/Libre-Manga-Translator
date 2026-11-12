@@ -11,6 +11,8 @@ import {
   validateTranslationResult,
   type LlmRunInfo,
 } from "../server/validator";
+import { normalizeGeminiUsageMetadata } from "../server/usage";
+import { delayUnlessAborted, isRetryableRequestError } from "../server/main";
 
 export async function translateWithGemini(
   imageSrc: string,
@@ -236,6 +238,58 @@ export async function makeSiteRuleWithGemini(
   return data;
 }
 
+/** Gemini answers a throttled request with a status and usually a wait hint. */
+class GeminiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryDelayMs?: number,
+  ) {
+    super(`Gemini API Error: ${message}`);
+    this.name = "GeminiRequestError";
+  }
+}
+
+/** Reads the error body once, keeping the provider message and wait hint. */
+async function toGeminiRequestError(
+  response: Response,
+): Promise<GeminiRequestError> {
+  let message = response.statusText;
+  let retryDelayMs: number | undefined;
+  try {
+    const err = (await response.json())?.error;
+    message = err?.message ?? message;
+    retryDelayMs = parseRetryDelayMs(
+      response.headers.get("retry-after"),
+      err?.details?.find((d: { retryDelay?: string }) => d?.retryDelay)
+        ?.retryDelay,
+    );
+  } catch {
+    // A proxy or gateway error page is not JSON; status alone still routes the
+    // retry decision.
+  }
+  return new GeminiRequestError(message, response.status, retryDelayMs);
+}
+
+/**
+ * Google's RetryInfo reports `45s`; the standard header reports seconds or an
+ * HTTP date. Whichever is present wins, RetryInfo first because it is precise.
+ */
+function parseRetryDelayMs(
+  header: string | null,
+  retryDelay?: string,
+): number | undefined {
+  const seconds = /^(\d+(?:\.\d+)?)s$/.exec(retryDelay ?? "");
+  if (seconds) return Math.ceil(parseFloat(seconds[1]) * 1000);
+  if (!header) return undefined;
+  const asNumber = Number(header);
+  if (Number.isFinite(asNumber)) return Math.max(0, Math.ceil(asNumber * 1000));
+  const deadline = Date.parse(header);
+  return Number.isNaN(deadline)
+    ? undefined
+    : Math.max(0, deadline - Date.now());
+}
+
 export async function sendRequestToGemini(
   systemPrompt: string,
   userPrompt: string,
@@ -263,7 +317,7 @@ export async function sendRequestToGemini(
   // intermediary and server-side request logs.
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-  const response = await fetch(url, {
+  const requestInit: RequestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -288,13 +342,29 @@ export async function sendRequestToGemini(
       },
     }),
     signal,
-  });
+  };
 
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(
-      `Gemini API Error: ${errorData.error?.message || response.statusText}`,
+  let response = await fetch(url, requestInit);
+
+  // A free-tier key is throttled constantly, and every throttled page used to
+  // fail outright while the queue fired the next one into the same window.
+  // Wait out the provider's own hint instead.
+  for (let attempt = 0; !response.ok; attempt++) {
+    const error = await toGeminiRequestError(response);
+    if (
+      !isRetryableRequestError(error) ||
+      attempt >= DefaultConfig.geminiMaxRetries ||
+      signal?.aborted
+    ) {
+      throw error;
+    }
+    const waitMs =
+      error.retryDelayMs ?? DefaultConfig.geminiRetryDelayMs * (attempt + 1);
+    console.warn(
+      `[gemini] HTTP ${error.status} - retrying in ${waitMs}ms (attempt ${attempt + 2} of ${DefaultConfig.geminiMaxRetries + 1})`,
     );
+    if (!(await delayUnlessAborted(waitMs, signal))) throw error;
+    response = await fetch(url, requestInit);
   }
 
   const result = await response.json();
@@ -310,6 +380,7 @@ export async function sendRequestToGemini(
     rawResponse: clipRawResponse(resultText),
     finishReason: typeof finishReason === "string" ? finishReason : undefined,
     promptChars: promptChars(systemPrompt, userPrompt),
+    usage: normalizeGeminiUsageMetadata(result.usageMetadata),
   };
 
   try {

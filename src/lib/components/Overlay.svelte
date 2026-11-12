@@ -827,7 +827,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
   }
 
-  onMount(async () => {
+  async function initOverlay() {
     const initialCache = await getTranslationCache();
 
     const rawBboxes = initialCache
@@ -835,6 +835,11 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       : await requestBubbleDetection();
 
     if (!Array.isArray(rawBboxes)) {
+      // mode starts as "loading", and the wrapper publishes data-lmt-mode from
+      // it. Leaving it here pinned the pill to "translating" over a page that
+      // would never advance, so the reader saw an endless spinner and could not
+      // retry — the queue treats pending overlays as already claimed.
+      mode = "refining";
       showError(rawBboxes?.error);
       Registry.markIdle(originalSrc);
       // Legacy autoclose preserved behind flag (see ERROR_AUTOCLOSE above).
@@ -894,7 +899,24 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         Registry.markIdle(originalSrc);
       }
     }
-  });
+  }
+
+  onMount(() =>
+    initOverlay().catch((err: unknown) => {
+      // getTranslationCache rejects on the job deadline, and
+      // requestBubbleDetection rejects when the MV3 port closes before a
+      // response. Both left the registry `pending` along with the queue slot
+      // it holds, which is how the queue wedged permanently after a few pages.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("LMT: overlay init failed:", err);
+      mode = "refining";
+      showError(message);
+      Registry.markIdle(originalSrc);
+      if (ERROR_AUTOCLOSE) {
+        setTimeout(() => onClose(), 5000);
+      }
+    }),
+  );
 
   const handleKeyDown = (e: KeyboardEvent) => {
     // Check if the target is inside this overlay / wrapper
@@ -1187,7 +1209,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         new CustomEvent("lmt:mode-change", { detail: { mode }, bubbles: true }),
       );
       wrapper.dispatchEvent(
-        new CustomEvent("lmt:progress", { detail: { message: loadingMsg }, bubbles: true }),
+        new CustomEvent("lmt:progress", {
+          detail: { src: originalSrc, message: loadingMsg },
+          bubbles: true,
+        }),
       );
     }
   });

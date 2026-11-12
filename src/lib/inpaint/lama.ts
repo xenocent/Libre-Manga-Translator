@@ -1,5 +1,5 @@
 import * as ort from "onnxruntime-web/all";
-import { downloadArtifactHF } from "../utils";
+import { createRunLock, downloadArtifactHF, throwIfAborted } from "../utils";
 import { DefaultConfig } from "../configs";
 import { gpuEnabledFor } from "../gpu-runtime";
 import type { Fitted } from "./fit";
@@ -13,6 +13,15 @@ import {
   TILE_HANDOFF,
   TILE_STRIDE,
 } from "./constants";
+
+/**
+ * LaMa shares the WASM thread with detection and OCR, and ONNX Runtime Web is
+ * non-reentrant across sessions in one thread. Every other ORT subsystem joins
+ * `sharedOrtTail` through createRunLock; LaMa was the sole exception, so a
+ * second page's inpaint could start inside a running one and never settle -
+ * which then wedges every later DETECT/OCR job queued behind it.
+ */
+const runExclusive = createRunLock("lama");
 
 let session: ort.InferenceSession | null = null;
 let loadPromise: Promise<ort.InferenceSession | null> | null = null;
@@ -82,6 +91,7 @@ export async function renderLamaPatches(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   bboxes: Bbox[],
+  signal?: AbortSignal,
 ): Promise<LamaPatchResult> {
   const records: LamaClusterRecord[] = [];
 
@@ -160,6 +170,9 @@ export async function renderLamaPatches(
 
   // 2. Process each bubble cluster independently at 1:1 native resolution
   for (let i = 0; i < boxes.length; i++) {
+    // One cluster is a full model pass; a job whose budget fired must stop
+    // taking them rather than push later pages further behind a dead result.
+    throwIfAborted(signal, "lama cluster");
     const b = boxes[i];
     const x0 = Math.max(0, Math.floor(b.minX - LAMA_PATCH_PAD));
     const y0 = Math.max(0, Math.floor(b.minY - LAMA_PATCH_PAD));
@@ -246,19 +259,24 @@ export async function renderLamaPatches(
         [inNames[1] ?? "mask"]: maskTensor,
       };
 
-      let outputs: Record<string, ort.Tensor>;
-      try {
-        outputs = await session.run(feeds);
-      } catch (runErr) {
-        const retried = await fallbackLamaToWasm();
-        if (!retried || !session) throw runErr;
-        const retryIn = session.inputNames;
-        const retryFeeds: Record<string, ort.Tensor> = {
-          [retryIn[0] ?? "image"]: imageTensor,
-          [retryIn[1] ?? "mask"]: maskTensor,
-        };
-        outputs = await session.run(retryFeeds);
-      }
+      const activeSession = session;
+      const activeImage = imageTensor;
+      const activeMask = maskTensor;
+      const outputs = await runExclusive(async () => {
+        try {
+          return await activeSession.run(feeds);
+        } catch (runErr) {
+          const retried = await fallbackLamaToWasm();
+          const rebuilt = session;
+          if (!retried || !rebuilt) throw runErr;
+          const retryIn = rebuilt.inputNames;
+          const retryFeeds: Record<string, ort.Tensor> = {
+            [retryIn[0] ?? "image"]: activeImage,
+            [retryIn[1] ?? "mask"]: activeMask,
+          };
+          return await rebuilt.run(retryFeeds);
+        }
+      }, signal);
 
       const outName = session.outputNames[0];
       outTensor = outputs[outName];
@@ -375,14 +393,18 @@ async function fallbackLamaToWasm(): Promise<boolean> {
 }
 
 export async function releaseLama(): Promise<void> {
-  if (session) {
+  const dying = session;
+  if (!dying) return;
+  // Released through the same tail as the runs: freeing a session while
+  // another page's tile is mid-run is how a run ends up never settling.
+  await runExclusive(async () => {
     try {
-      await session.release();
+      await dying.release();
     } catch (e) {
       console.warn("LMT: error releasing LaMa session:", e);
     }
-    session = null;
-  }
+  });
+  session = null;
 }
 
 /** Compute 1-D tile origins along an axis spanning extent from start. */
@@ -572,21 +594,26 @@ export async function renderLama(
       feeds[inNames[0] ?? "image"] = imageTensor;
       feeds[inNames[1] ?? "mask"] = maskTensor;
 
-      let outputs: Record<string, ort.Tensor>;
-      try {
-        outputs = await session.run(feeds);
-      } catch (runErr) {
-        // WebGPU kernels can throw at run() even when create() succeeded
-        // (unsupported op combo). Rebuild once on WASM and retry this tile.
-        const retried = await fallbackLamaToWasm();
-        if (!retried || !session) throw runErr;
-        const retryIn = session.inputNames;
-        const retryFeeds: Record<string, ort.Tensor> = {
-          [retryIn[0] ?? "image"]: imageTensor,
-          [retryIn[1] ?? "mask"]: maskTensor,
-        };
-        outputs = await session.run(retryFeeds);
-      }
+      const tileSession = session;
+      const tileImage = imageTensor;
+      const tileMask = maskTensor;
+      const outputs = await runExclusive(async () => {
+        try {
+          return await tileSession.run(feeds);
+        } catch (runErr) {
+          // WebGPU kernels can throw at run() even when create() succeeded
+          // (unsupported op combo). Rebuild once on WASM and retry this tile.
+          const retried = await fallbackLamaToWasm();
+          const rebuilt = session;
+          if (!retried || !rebuilt) throw runErr;
+          const retryIn = rebuilt.inputNames;
+          const retryFeeds: Record<string, ort.Tensor> = {
+            [retryIn[0] ?? "image"]: tileImage,
+            [retryIn[1] ?? "mask"]: tileMask,
+          };
+          return await rebuilt.run(retryFeeds);
+        }
+      });
       const outNames = session.outputNames;
       outTensor = outputs[outNames[0] ?? Object.keys(outputs)[0]];
       const outData = (await outTensor.getData()) as Float32Array;
