@@ -26,11 +26,6 @@ let session: ort.InferenceSession | null = null;
 let loadPromise: Promise<ort.InferenceSession | null> | null = null;
 let lastLamaError: string | null = null;
 let sessionWasmFallback = false;
-// LaMa owns an inference session just like detection/OCR/gate do. It serializes
-// its own runs (same session is non-reentrant: "Session already started") but
-// no longer shares a global tail with other subsystems, so a LaMa pass can
-// proceed while detection or OCR runs.
-const runExclusive = createRunLock("lama");
 
 export const lamaReady = (): boolean => !!session;
 export const getLastLamaError = (): string | null => lastLamaError;
@@ -91,7 +86,7 @@ function createLocalCanvas(w: number, h: number): HTMLCanvasElement | OffscreenC
   throw new Error("No canvas implementation available");
 }
 
-export async function renderLamaPatchesUnlocked(
+async function renderLamaPatchesUnlocked(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   bboxes: Bbox[],
@@ -266,24 +261,27 @@ export async function renderLamaPatchesUnlocked(
       const activeSession = session;
       const activeImage = imageTensor;
       const activeMask = maskTensor;
-      const outputs = await runExclusive(async () => {
-        try {
-          return await activeSession.run(feeds);
-        } catch (runErr) {
-          const retried = await fallbackLamaToWasm();
-          const rebuilt = session;
-          if (!retried || !rebuilt) throw runErr;
-          const retryIn = rebuilt.inputNames;
-          const retryFeeds: Record<string, ort.Tensor> = {
-            [retryIn[0] ?? "image"]: activeImage,
-            [retryIn[1] ?? "mask"]: activeMask,
-          };
-          return await rebuilt.run(retryFeeds);
-        }
-      }, signal);
+      // The whole pass already runs inside `runExclusive` (see the exported
+      // wrapper), so this call must not take the tail again — a nested acquire
+      // on the same FIFO tail would wait on itself forever.
+      try {
+        const outputs = await activeSession.run(feeds);
+        const outName = session.outputNames[0];
+        outTensor = outputs[outName];
+      } catch (runErr) {
+        const retried = await fallbackLamaToWasm();
+        const rebuilt = session;
+        if (!retried || !rebuilt) throw runErr;
+        const retryIn = rebuilt.inputNames;
+        const retryFeeds: Record<string, ort.Tensor> = {
+          [retryIn[0] ?? "image"]: activeImage,
+          [retryIn[1] ?? "mask"]: activeMask,
+        };
+        const outputs = await rebuilt.run(retryFeeds);
+        const outName = rebuilt.outputNames[0];
+        outTensor = outputs[outName];
+      }
 
-      const outName = session.outputNames[0];
-      outTensor = outputs[outName];
       const outData = (await outTensor.getData()) as Float32Array;
 
       // Transfer output to patch canvas
@@ -344,9 +342,11 @@ export async function renderLamaPatches(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   bboxes: Bbox[],
+  signal?: AbortSignal,
 ): Promise<LamaPatchResult> {
-  return runExclusive(() =>
-    renderLamaPatchesUnlocked(canvas, ctx, bboxes),
+  return runExclusive(
+    () => renderLamaPatchesUnlocked(canvas, ctx, bboxes, signal),
+    signal,
   );
 }
 
@@ -503,7 +503,7 @@ function inRect(x: number, y: number, r: { x: number; y: number; w: number; h: n
  * Execute LaMa inpainting on the region.
  * Returns true if the model ran and rendered into page, false on decline / failure.
  */
-export async function renderLamaUnlocked(
+async function renderLamaUnlocked(
   page: ImageData,
   fitted: Fitted,
 ): Promise<boolean> {
@@ -612,23 +612,24 @@ export async function renderLamaUnlocked(
       const tileSession = session;
       const tileImage = imageTensor;
       const tileMask = maskTensor;
-      const outputs = await runExclusive(async () => {
-        try {
-          return await tileSession.run(feeds);
-        } catch (runErr) {
-          // WebGPU kernels can throw at run() even when create() succeeded
-          // (unsupported op combo). Rebuild once on WASM and retry this tile.
-          const retried = await fallbackLamaToWasm();
-          const rebuilt = session;
-          if (!retried || !rebuilt) throw runErr;
-          const retryIn = rebuilt.inputNames;
-          const retryFeeds: Record<string, ort.Tensor> = {
-            [retryIn[0] ?? "image"]: tileImage,
-            [retryIn[1] ?? "mask"]: tileMask,
-          };
-          return await rebuilt.run(retryFeeds);
-        }
-      });
+      // Runs inside `runExclusive` at the exported entry point — re-acquiring
+      // the same FIFO tail here would deadlock.
+      let outputs: Record<string, ort.Tensor>;
+      try {
+        outputs = await tileSession.run(feeds);
+      } catch (runErr) {
+        // WebGPU kernels can throw at run() even when create() succeeded
+        // (unsupported op combo). Rebuild once on WASM and retry this tile.
+        const retried = await fallbackLamaToWasm();
+        const rebuilt = session;
+        if (!retried || !rebuilt) throw runErr;
+        const retryIn = rebuilt.inputNames;
+        const retryFeeds: Record<string, ort.Tensor> = {
+          [retryIn[0] ?? "image"]: tileImage,
+          [retryIn[1] ?? "mask"]: tileMask,
+        };
+        outputs = await rebuilt.run(retryFeeds);
+      }
       const outNames = session.outputNames;
       outTensor = outputs[outNames[0] ?? Object.keys(outputs)[0]];
       const outData = (await outTensor.getData()) as Float32Array;

@@ -1,8 +1,8 @@
 # Changelog
 
-## v2.0.0 (unreleased) — November 2026
+## v1.0.5 (unreleased) — November 2026
 
-Stable detection on WebGL/GPU comic readers, per-subsystem inference locks, and the queue reliability work from the v1.0.5 line. Fixes the class of failures where the pipeline stopped answering *at all*, kept charging for work it had already done, and found nothing at all on canvas-based readers.
+Stable detection on WebGL/GPU comic readers, per-subsystem inference locks, and queue reliability. Fixes the class of failures where the pipeline stopped answering *at all*, kept charging for work it had already done, and found nothing at all on canvas-based readers.
 
 ### Added
 
@@ -18,7 +18,7 @@ Stable detection on WebGL/GPU comic readers, per-subsystem inference locks, and 
 - **A page is cached as soon as the model answers,** not only when every box translated. The fully-clean predicate (`LMT-026`) now gates only the *series context* update, which is the part an echoed page can actually poison; the page record keeps echoed boxes blank so a cache hit repaints exactly what was shown live. One unanswered bubble out of twelve no longer discards text the user paid for.
 - **`cleanedSrc` is persisted even when the preceding cache read comes back empty.** It is the only record of the inpainted base, and losing it forced a full LaMa pass on every later visit to a page whose text was already translated.
 - **One implementation of page identity,** shared by the storage cache and the registry's in-flight claim. They were computed separately and had to be kept matching by hand.
-- **LaMa now runs under its own lock.** `renderLama` / `renderLamaPatches` were the only inference paths without a run lock, so a LaMa pass could race detection/OCR into the same (single-threaded) worker. They now serialize their own runs and remain parallel to other subsystems.
+- **LaMa runs under its own lock at the entry point.** `renderLama` / `renderLamaPatches` now take the `lama` tail once per pass, rather than around each individual `session.run()`. The unlocked internals are no longer exported, so nothing can reach the session without the lock.
 
 ### Fixed
 
