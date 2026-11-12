@@ -144,9 +144,10 @@ function timedOutError(
  * Detection, OCR and inpaint run on ONNX sessions that expose no abort hook,
  * so `jobDeadline`'s signal alone cannot stop them: the promise simply never
  * settles, `sendResponse` is never called, and the content script waits on a
- * reply that will not come (`sharedOrtTail` keeps the queue head too, so every
- * later page queues behind it). Racing the work at least turns an unbounded
- * hang into the bounded, visible error the budget was written to produce.
+ * reply that will not come (the stalled job also holds its subsystem's tail,
+ * so every later run of that same subsystem queues behind it). Racing the work
+ * at least turns an unbounded hang into the bounded, visible error the budget
+ * was written to produce.
  */
 function untilDeadline<T>(
   work: Promise<T>,
