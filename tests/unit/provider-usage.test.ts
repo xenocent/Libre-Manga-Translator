@@ -6,7 +6,7 @@ import {
 } from "../../src/lib/server/usage";
 
 describe("provider-reported token usage", () => {
-  it("normalizes Gemini's token metadata without filling missing fields", () => {
+  it("normalizes Gemini's reported token metadata", () => {
     expect(
       normalizeGeminiUsageMetadata({
         promptTokenCount: 120,
@@ -20,10 +20,27 @@ describe("provider-reported token usage", () => {
       thinkingTokens: 8,
       cachedInputTokens: 20,
     });
+    expect(normalizeGeminiUsageMetadata(undefined)).toBeUndefined();
+  });
+
+  it("reads Gemini's omitted billing categories as zero, not unknown", () => {
+    // Gemini omits a counter when it is zero: a reply without thinking carries
+    // no thoughtsTokenCount. Reporting that as `undefined` made the cost
+    // estimator — which needs all four classes — return null on every page,
+    // so the usage panel showed requests climbing beside "Unknown" forever.
     expect(normalizeGeminiUsageMetadata({ promptTokenCount: 12 })).toEqual({
       inputTokens: 12,
+      outputTokens: undefined,
+      thinkingTokens: 0,
+      cachedInputTokens: 0,
     });
-    expect(normalizeGeminiUsageMetadata(undefined)).toBeUndefined();
+
+    // A record with no billed input or output is still unknown: the zero-fill
+    // applies only to the categories Gemini treats as optional.
+    expect(normalizeGeminiUsageMetadata({})).toBeUndefined();
+    expect(
+      normalizeGeminiUsageMetadata({ thoughtsTokenCount: 0 }),
+    ).toBeUndefined();
   });
 
   it("normalizes OpenAI-compatible usage and separates reported reasoning tokens", () => {

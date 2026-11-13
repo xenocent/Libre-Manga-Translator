@@ -508,10 +508,25 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
 
     loadingMsg = "Translating text…";
 
-    const result = await requestTextTranslation(
-      $state.snapshot(bboxes),
-      isManuallySorted,
-    );
+    // `requestTextTranslation` can REJECT, not just answer `{error}`: the MV3
+    // port closes when the service worker is killed or the extension context
+    // is invalidated mid-job (`background/messaging.ts:1-6`). Unhandled, that
+    // rejection left `mode` pinned on "loading" for good — the wrapper kept
+    // publishing data-lmt-mode="loading", so the pill said "translating" and
+    // the registry claim was never released. The initOverlay path is covered
+    // by its onMount catch; this manual path is not, so it needs its own.
+    let result: Awaited<ReturnType<typeof requestTextTranslation>>;
+    try {
+      result = await requestTextTranslation(
+        $state.snapshot(bboxes),
+        isManuallySorted,
+      );
+    } catch (err) {
+      mode = "refining";
+      showError(err instanceof Error ? err.message : String(err));
+      Registry.markIdle(originalSrc);
+      return;
+    }
     if (typeof result === "object" && "error" in result) {
       mode = "refining";
       showError(result.error);
@@ -557,7 +572,16 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
 
   async function handleConfirm() {
     if (mode !== "refining") return;
-    return executeTranslation();
+    // Last line of defence: executeTranslation handles its own failures, but
+    // anything thrown outside those blocks must not escape as an unhandled
+    // rejection that would leave the overlay on "loading" with the claim held.
+    try {
+      await executeTranslation();
+    } catch (err) {
+      mode = "refining";
+      showError(err instanceof Error ? err.message : String(err));
+      Registry.markIdle(originalSrc);
+    }
   }
 
   async function openEditPanel() {

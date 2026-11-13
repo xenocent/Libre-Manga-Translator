@@ -8,6 +8,7 @@ import { testServerConnection } from "@/lib/server/main";
 import { createAsyncResponder, keepAliveWhile, withTimeout } from "./messaging";
 import { resolveJobGuardTimeout, resolveJobTimeout } from "@/lib/timeouts";
 import { isAllowedImageUrl } from "@/lib/security";
+import { writeFileLog, revealFileLog } from "@/lib/debug/file-log";
 
 export default defineBackground(() => {
   // ── Unified backend limiter ──────────────────────────────────────────
@@ -1041,6 +1042,41 @@ export default defineBackground(() => {
       const downloads: Record<string, unknown> = {};
       for (const [key, job] of managedJobs) downloads[key] = managedSnapshot(job);
       respond({ success: true, downloads });
+      return true;
+    }
+
+    // Diagnostic file output. The content script owns the timeline buffer; this
+    // worker is the only context that can reach the Downloads API, so it just
+    // writes what it is handed.
+    if (msg.type === "WRITE_DEBUG_FILE") {
+      const { content, filename } = msg.data ?? {};
+      if (typeof content !== "string") {
+        respond({ success: false, error: "missing content" });
+        return true;
+      }
+      keepAliveWhile(
+        writeFileLog(content, {
+          filename:
+            typeof filename === "string" && filename
+              ? filename
+              : undefined,
+        })
+          .then((ok) => ({ success: ok }))
+          .catch((err) => ({ success: false, error: (err as Error)?.message })),
+      )
+        .then(respond)
+        .catch(respondErr);
+      return true;
+    }
+
+    if (msg.type === "REVEAL_DEBUG_FILE") {
+      keepAliveWhile(
+        revealFileLog(typeof msg.data?.filename === "string" ? msg.data.filename : undefined)
+          .then((ok) => ({ success: ok }))
+          .catch(() => ({ success: false })),
+      )
+        .then(respond)
+        .catch(respondErr);
       return true;
     }
 

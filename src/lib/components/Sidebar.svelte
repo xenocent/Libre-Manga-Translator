@@ -40,7 +40,7 @@ import { onDestroy } from "svelte";
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
 
-  let queue = $state<QueueProgress>({ active: 0, queued: 0, completed: 0 });
+  let queue = $state<QueueProgress>({ active: 0, queued: 0, completed: 0, detected: 0 });
   $effect(() => {
     const onProgress = (e: Event) => {
       const detail = (e as CustomEvent<QueueProgress>).detail;
@@ -431,13 +431,15 @@ import { onDestroy } from "svelte";
 >
   <div
     class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl"
-    title={`${queue.active} translating · ${queue.queued} queued · ${queue.completed} done and cached on this page`}
+    title={`${queue.active} translating · ${queue.queued} queued · ${queue.completed} of ${queue.detected} detected done and cached on this page`}
   >
     <span class="text-[var(--accent-cyan)]">{queue.active}</span>
     <span> / </span>
     <span>{queue.active + queue.queued}</span>
     <span> / </span>
     <span class="text-[var(--accent-amber)]">{queue.completed}</span>
+    <span class="text-[var(--text-dim)]"> / </span>
+    <span class="text-[var(--text-dim)]">{queue.detected}</span>
   </div>
   <button
     type="button"

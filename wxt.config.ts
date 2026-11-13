@@ -51,6 +51,9 @@ export default defineConfig({
       "storage",
       "unlimitedStorage",
       "declarativeNetRequest",
+      // Diagnostic timeline output: the debug log is handed to the browser as
+      // a file, which is the only way an extension can write one.
+      "downloads",
     ],
     host_permissions: ["<all_urls>"],
     web_accessible_resources: [

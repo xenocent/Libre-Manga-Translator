@@ -8,6 +8,7 @@ import { ShadowRootContentScriptUi, storage } from "#imports";
 import { getSiteRule, resolveActiveSiteRule } from "@/lib/adapters";
 import { DefaultConfig, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
 import { logDebugEntry, updateDebugEntry } from "./debug";
+import { installTimelineLogger, recordTimeline } from "./timeline-logger";
 import { recordProviderUsage } from "./provider-usage";
 import {
   createImageObservers,
@@ -60,6 +61,13 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
 // Wait until the image has a real layout (loaded + non-zero rendered box).
 // Measuring a hidden/not-yet-loaded image freezes the wrapper at 0×0 and
 // misplaces the whole overlay on revisit.
+//
+// The deadline is a real timer, NOT requestAnimationFrame. rAF is suspended
+// in a backgrounded/occluded tab, so a loop that only re-checks its budget
+// after a rAF callback parks forever there — the pipeline kept the registry
+// claim and the queue slot, the pill stayed on "translating", and page after
+// page never advanced. A timer fires regardless of frame delivery; the rAF
+// tick is only a pacing hint that is raced against it.
 async function waitForLaidOutImage(
   img: MangaTargetElement,
   timeoutMs = 3000,
@@ -84,10 +92,26 @@ async function waitForLaidOutImage(
     );
   };
   if (ready()) return true;
-  const start = performance.now();
-  while (performance.now() - start < timeoutMs) {
+
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
     if (!document.body.contains(img)) return false;
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    // Whichever comes first: the next frame, or a short timer. In a visible
+    // tab the frame wins and this stays frame-aligned; in a hidden one the
+    // timer keeps the deadline reachable instead of hanging on a paused rAF.
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const timer = setTimeout(finish, 100);
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        finish();
+      });
+    });
     if (ready()) return true;
   }
   return ready();
@@ -169,6 +193,10 @@ export default defineContentScript({
   cssInjectionMode: "ui",
 
   async main(ctx) {
+    // Start the diagnostic timeline before anything else can transition, so a
+    // page that hangs on its first dispatch is still explained by the log.
+    void installTimelineLogger();
+
     const translatedSrcMap = new Map<string, string>();
     const inpaintedSrcCache = new Map<
       string,
@@ -207,9 +235,14 @@ export default defineContentScript({
       if (!originalSrc) return;
 
       // ── Strict early registry guard (LMT-only, no page-world exposure) ──
+      // Key-level lookups: `syncK` is already a derived key, and srcKeyOf
+      // hashes, so isPending(syncK) would probe hash(hash(src)) and never
+      // match. That left this guard dead and let a second pipeline claim an
+      // image already in flight (it stole the <img> out of the live overlay,
+      // leaving the first one spinning on "Translating…" forever).
       const syncK = Registry.srcKeyOf(originalSrc);
-      if (Registry.isPending(syncK)) return;
-      if (Registry.getStatus(syncK) === "done" && overlays.has(originalSrc)) {
+      if (Registry.isPendingKey(syncK)) return;
+      if (Registry.statusOfKey(syncK) === "done" && overlays.has(originalSrc)) {
         const existingDone = overlays.get(originalSrc)!;
         if (document.body.contains(existingDone.wrapper)) {
           existingDone.wrapper.dispatchEvent(
@@ -243,26 +276,35 @@ export default defineContentScript({
       // releases the slot and rescan retries when the page is visible.
       if (!(await waitForLaidOutImage(imgElement))) return;
 
-      // Claim the pipeline SYNCHRONOUSLY (before the first await below)
-      // so queue slot accounting sees pending on the same tick the queue
-      // dispatched this call. The full cacheKey attaches right after.
-      Registry.markPending(originalSrc);
+      // Claim the pipeline SYNCHRONOUSLY and atomically. The earlier guard
+      // above ran before `waitForLaidOutImage`, which awaits up to 3 s, so two
+      // dispatches could both get past it; tryMarkPending is the point that
+      // actually decides ownership. Losing it means the page is already
+      // claimed, and the winner releases it — so return without writing.
+      if (!Registry.tryMarkPending(originalSrc)) return;
+      recordTimeline("pipeline", "claimed for translation", {
+        page: srcKey(originalSrc).slice(0, 20),
+        imgsize: imgElement instanceof HTMLCanvasElement
+          ? `${imgElement.width}x${imgElement.height}`
+          : undefined,
+      });
 
-      // Compute full cacheKey early for strict block on pending cacheKey
+      // Resolve the full cache key and attach it to OUR claim. This used to
+      // read the cache-key status and call markIdle(originalSrc) on "pending",
+      // which destroyed the other run's bySrc claim (and swept its cache-key
+      // claim) while owning neither — so a third dispatch got in and the page
+      // was paid for twice. claimCacheKey only writes when the key is free.
       let pendingCacheKey: string | undefined;
       try {
         pendingCacheKey = await Registry.resolveCacheKey(originalSrc);
-        if (Registry.getStatusByCacheKey(pendingCacheKey) === "pending") {
+        if (!Registry.claimCacheKey(originalSrc, pendingCacheKey)) {
+          // Another run owns this page's cache key; it also owns the release.
           Registry.markIdle(originalSrc);
           return;
         }
       } catch {
         console.warn("LMT: cache-key resolve failed; continuing without dedupe guard");
       }
-
-      // Attach the cacheKey to the pending claim (idempotent re-mark).
-      // Mark pending BEFORE any heavy work / overlay creation so second call strict-blocks
-      Registry.markPending(originalSrc, pendingCacheKey);
 
       // Yield the main thread immediately so the user's click handler returns
       // and the browser can process the next UI event (e.g. opening the popup
@@ -425,6 +467,10 @@ export default defineContentScript({
                   const detModel = normalizeDetectionModel(
                     (await storage.getItem<string>("sync:detection-model")) ?? DefaultConfig.detectionModels[0].id,
                   );
+                  recordTimeline("detect", "request sent", {
+                    page: srcKey(originalSrc).slice(0, 20),
+                    model: detModel,
+                  });
                   const res = await browser.runtime.sendMessage({
                     type: "DETECT_BBOX",
                     data: src,
@@ -436,6 +482,11 @@ export default defineContentScript({
                     },
                   });
                   lastDetectMs = performance.now() - tStart;
+                  recordTimeline("detect", "response", {
+                    ms: Math.round(lastDetectMs),
+                    boxes: Array.isArray(res?.bboxes) ? res.bboxes.length : 0,
+                    error: res?.error,
+                  });
                   return res;
                 },
 
@@ -542,6 +593,12 @@ export default defineContentScript({
                     runtimeItems.map((i) => [i.key, i.value]),
                   );
 
+                  recordTimeline("translate", "request sent", {
+                    page: srcKey(originalSrc).slice(0, 20),
+                    mode: curMode,
+                    boxes: bboxes.length,
+                  });
+
                   const resp = await browser.runtime.sendMessage({
                     type: "TRANSLATE_IMAGE",
                     data: {
@@ -575,6 +632,17 @@ export default defineContentScript({
                   });
 
                   const duration = performance.now() - t0;
+
+                  recordTimeline("translate", "response", {
+                    page: srcKey(originalSrc).slice(0, 20),
+                    ms: Math.round(duration),
+                    error: resp?.error ? String(resp.error).slice(0, 120) : undefined,
+                    translations: Array.isArray(resp?.translations)
+                      ? resp.translations.length
+                      : 0,
+                    usage: resp?.diagnostics?.usage,
+                    calls: resp?.diagnostics?.llmCalls,
+                  });
 
                   void recordProviderUsage(
                     curMode,
@@ -987,6 +1055,9 @@ export default defineContentScript({
         }).then((ui) => {
           overlays.set(originalSrc, { ui, wrapper });
           ui.mount();
+          recordTimeline("pipeline", "overlay mounted", {
+            page: srcKey(originalSrc).slice(0, 20),
+          });
 
           styleObserver.observe(imgElement, {
             attributes: true,
@@ -997,6 +1068,10 @@ export default defineContentScript({
             subtree: true,
           });
         }).catch((err: unknown) => {
+          recordTimeline("pipeline", "overlay setup FAILED", {
+            page: srcKey(originalSrc).slice(0, 20),
+            err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          });
           // The pipeline claimed the registry at markPending above and the
           // queue holds a slot until it sees done/idle. If the UI never mounts
           // there is no Overlay to emit either, so release it here or the

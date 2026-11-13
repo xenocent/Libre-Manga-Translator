@@ -3,11 +3,35 @@ import { storage } from "#imports";
 import * as Registry from "./translation-registry";
 import { queryScopedTargets } from "./auto-translate-targets";
 import { getTargetSource } from "./target-source";
+import { dlog, shortKey } from "@/lib/debug/timeline";
 import type { MangaTargetElement } from "@/lib/canvas";
+import {
+  allowsHost,
+  AUTO_DOMAINS_KEY,
+  AUTO_SCOPE_KEY,
+  looksLikeReaderPage,
+  type AutoScopeState,
+} from "./auto-translate-scope";
 
 export type TranslateFn = (img: MangaTargetElement) => Promise<void>;
 
 export const MANUAL_CONCURRENCY = 3;
+
+/**
+ * Hard ceiling on how long one dispatch may hold its slot.
+ *
+ * Every other release path is event-driven: the overlay emits done or idle,
+ * or the task rejects. If none of those ever arrives — a pipeline parked in a
+ * layout wait, an overlay that never mounted, a promise that resolved after
+ * the slot key changed — the slot is held for the life of the tab and, at a
+ * concurrency of 1, the rest of the chapter never starts. This timer is the
+ * backstop for exactly that, and it fires ONCE: it frees the slot and lets
+ * the ordinary rescan retry the page. It is deliberately not a retry loop.
+ *
+ * The budget is the worst honest case for one page: local translate (480 s)
+ * plus a quality inpaint (300 s) plus detection and slack.
+ */
+export const SLOT_MAX_MS = 15 * 60_000;
 
 export class AutoTranslateQueue {
   private queue: { img: MangaTargetElement; fn: TranslateFn; key: string }[] = [];
@@ -18,6 +42,8 @@ export class AutoTranslateQueue {
   private inFlight = new Set<string>();
   private activeTargets = new WeakSet<MangaTargetElement>();
   private inFlightTargets = new Map<string, MangaTargetElement>();
+  /** Per-slot watchdog, so no dispatch can hold a slot forever. */
+  private slotTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private concurrency = 1;
   private seenKeys = new Set<string>();
   private lastTranslateFn: TranslateFn | null = null;
@@ -40,6 +66,7 @@ export class AutoTranslateQueue {
       }
       if (!this.inFlight.has(k)) return;
       this.inFlight.delete(k);
+      this.clearSlotTimer(k);
       this.releaseTarget(k);
       // done → keep seenKeys so finished pages never requeue.
       if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
@@ -48,10 +75,46 @@ export class AutoTranslateQueue {
   }
 
   private releaseTarget(k: string) {
+    this.clearSlotTimer(k);
     const target = this.inFlightTargets.get(k);
     if (!target) return;
     this.inFlightTargets.delete(k);
     this.activeTargets.delete(target);
+  }
+
+  private clearSlotTimer(k: string) {
+    const timer = this.slotTimers.get(k);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.slotTimers.delete(k);
+  }
+
+  /**
+   * Arm the backstop for one dispatch. Firing means the page produced no
+   * terminal signal at all, so free the slot exactly once and let the reader's
+   * rescan re-dispatch it. `markIdle` is what makes that retry possible —
+   * without it the registry would keep the page claimed and the guard would
+   * drop the rescan.
+   */
+  private armSlotTimer(k: string, src: string) {
+    this.clearSlotTimer(k);
+    const timer = setTimeout(() => {
+      this.slotTimers.delete(k);
+      if (!this.inFlight.has(k)) return;
+      dlog("queue", "slot watchdog fired", {
+        page: shortKey(k),
+        afterMs: SLOT_MAX_MS,
+      });
+      this.inFlight.delete(k);
+      this.releaseTarget(k);
+      this.seenKeys.delete(k);
+      Registry.markIdle(src);
+      if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
+      this.publish();
+    }, SLOT_MAX_MS);
+    // A held Node timer must not keep a test process (or a worker) alive.
+    (timer as { unref?: () => void }).unref?.();
+    this.slotTimers.set(k, timer);
   }
 
   destroy() {
@@ -62,6 +125,8 @@ export class AutoTranslateQueue {
       );
       this.statusListener = null;
     }
+    for (const timer of this.slotTimers.values()) clearTimeout(timer);
+    this.slotTimers.clear();
   }
 
   setConcurrency(n: number) {
@@ -99,9 +164,12 @@ export class AutoTranslateQueue {
     if (!src) return;
     const k = Registry.srcKeyOf(src);
     if (
-      Registry.isPending(k) ||
+      // Key-level guards: `k` is already derived, and srcKeyOf hashes, so the
+      // src-taking guards would probe hash(hash(src)) and never match. That
+      // made this "strict block" inert.
+      Registry.isPendingKey(k) ||
       this.inFlight.has(k) ||
-      Registry.getStatus(k) === "done" ||
+      Registry.statusOfKey(k) === "done" ||
       this.seenKeys.has(k) ||
       this.queue.some((e) => e.img === img)
     )
@@ -109,12 +177,47 @@ export class AutoTranslateQueue {
     this.seenKeys.add(k);
     this.queue.push({ img, fn: translateFn, key: k });
     this.lastTranslateFn = translateFn;
+    dlog("queue", "enqueue", {
+      page: shortKey(k),
+      queued: this.queue.length,
+      active: this.inFlight.size,
+    });
     this.drain(translateFn);
   }
 
   /** Powers the queue readout beside the settings gear. */
   private publish() {
     Registry.setQueueCounts(this.inFlight.size, this.queue.length);
+  }
+  /**
+   * The key the dispatched page ended up with. The pipeline re-reads the
+   * target's source at claim time, so a recycled <img> or a redrawn canvas can
+   * legitimately land on a different page than the one enqueued. When that
+   * happened, move the slot (and its watchdog) onto the live key so the
+   * terminal registry event releases it instead of missing a stale entry.
+   */
+  private slotKeyAfterMount(enqueuedKey: string, img: MangaTargetElement): string {
+    if (!document.body.contains(img)) return enqueuedKey;
+    const src = getTargetSource(img, false);
+    if (!src) return enqueuedKey;
+    const live = Registry.srcKeyOf(src);
+    if (live === enqueuedKey || !this.inFlight.has(enqueuedKey)) return live;
+    this.inFlight.delete(enqueuedKey);
+    this.inFlight.add(live);
+    this.seenKeys.delete(enqueuedKey);
+    this.seenKeys.add(live);
+    const timer = this.slotTimers.get(enqueuedKey);
+    if (timer !== undefined) {
+      this.slotTimers.delete(enqueuedKey);
+      this.slotTimers.set(live, timer);
+    }
+    this.inFlightTargets.delete(enqueuedKey);
+    this.inFlightTargets.set(live, img);
+    dlog("queue", "slot rekeyed after mount", {
+      was: shortKey(enqueuedKey),
+      now: shortKey(live),
+    });
+    return live;
   }
 
   private drain(translateFn: (img: MangaTargetElement) => Promise<void>) {
@@ -128,22 +231,36 @@ export class AutoTranslateQueue {
       const src = getTargetSource(targetImg, true);
       if (!src || !document.body.contains(targetImg)) {
         // Skip detached images without consuming a slot
+        dlog("queue", "skip: detached or sourceless", {
+          page: shortKey(entry.key),
+          inDom: !!src,
+        });
         this.seenKeys.delete(entry.key);
         continue;
       }
       // Strict registry guard at drain time as well (covers race between enqueue and drain)
       const k = Registry.srcKeyOf(src);
       if (k !== entry.key) {
+        dlog("queue", "skip: source key changed", {
+          was: shortKey(entry.key),
+          now: shortKey(k),
+        });
         this.seenKeys.delete(entry.key);
         if (this.seenKeys.has(k)) continue;
         this.seenKeys.add(k);
         entry.key = k;
       }
-      if (Registry.isPending(k) || this.inFlight.has(k)) {
+      if (Registry.isPendingKey(k) || this.inFlight.has(k)) {
+        dlog("queue", "skip: already claimed", {
+          page: shortKey(k),
+          pending: Registry.isPendingKey(k),
+          inFlight: this.inFlight.has(k),
+        });
         this.seenKeys.delete(k);
         continue;
       }
-      if (Registry.getStatus(k) === "done") {
+      if (Registry.statusOfKey(k) === "done") {
+        dlog("queue", "skip: already done", { page: shortKey(k) });
         this.seenKeys.delete(k);
         continue;
       }
@@ -151,20 +268,40 @@ export class AutoTranslateQueue {
       this.inFlight.add(k);
       this.activeTargets.add(targetImg);
       this.inFlightTargets.set(k, targetImg);
+      this.armSlotTimer(k, src);
+      dlog("queue", "dispatch", {
+        page: shortKey(k),
+        active: this.inFlight.size,
+        queued: this.queue.length,
+        concurrency: this.concurrency,
+      });
       // Fire-and-forget: translateFn sets up its own overlay and async
       // flow. Failure or done signals through the registry event above.
+      //
+      // The pipeline may claim a DIFFERENT key than the one recorded here: a
+      // slider reader recycles one <img> and only swaps its src, and a redrawn
+      // canvas re-snapshots to a new URL. Both sides would then name different
+      // pages, the done/idle event would never match this slot, and the
+      // watchdog would be the only thing ever to free it. Re-derive the key
+      // once the mount has settled and migrate the slot onto it.
       translateFn(targetImg)
         .then(() => {
-          if (!Registry.isPending(k) && Registry.getStatus(k) !== "done") {
-            this.inFlight.delete(k);
-            this.releaseTarget(k);
-            this.seenKeys.delete(k);
-            Registry.markIdle(src);
-            if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
-          }
+          const live = this.slotKeyAfterMount(k, targetImg);
+          const pending = Registry.isPendingKey(live);
+          const done = Registry.statusOfKey(live) === "done";
+          if (pending || done) return; // terminal event will release it
+          this.inFlight.delete(live);
+          this.releaseTarget(live);
+          this.seenKeys.delete(live);
+          Registry.markIdle(src);
+          if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
         })
         .catch((err) => {
           console.warn("LMT: auto-translate task failed:", err);
+          dlog("queue", "task rejected", {
+            page: shortKey(k),
+            err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          });
           this.inFlight.delete(k);
           this.releaseTarget(k);
           this.seenKeys.delete(k);
@@ -203,7 +340,11 @@ export class AutoTranslateOrchestrator {
   private translateFn: ((img: MangaTargetElement) => Promise<void>) | null = null;
   private unwatchStorage: (() => void) | null = null;
   private unwatchConcurrency: (() => void) | null = null;
+  private unwatchScope: (() => void) | null = null;
+  private unwatchDomains: (() => void) | null = null;
   private pageRescanTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Host decisions; `null` until the first read lands. */
+  private scopeState: AutoScopeState | null = null;
 
   private scheduleReaderRescan = (event: Event) => {
     if (!this.isEnabled) return;
@@ -226,6 +367,7 @@ export class AutoTranslateOrchestrator {
     this.translateFn = translateFn;
 
     await this.applyCap();
+    await this.loadScope();
     const initialEnabled =
       await storage.getItem<boolean>("sync:auto-translate");
     if (initialEnabled ?? false) {
@@ -253,6 +395,58 @@ export class AutoTranslateOrchestrator {
         await this.applyCap();
       },
     );
+
+    // A scope change must take effect on open tabs immediately: enabling domain
+    // scope on a tab that is already translating has to stop it, and adding the
+    // current host has to let it begin.
+    this.unwatchScope = storage.watch<AutoScopeState>(AUTO_SCOPE_KEY, (value) => {
+      this.scopeState = value ?? this.scopeState;
+      this.reevaluateScope();
+    });
+    this.unwatchDomains = storage.watch<Record<string, boolean>>(
+      AUTO_DOMAINS_KEY,
+      () => {
+        void this.loadScope().then(() => this.reevaluateScope());
+      },
+    );
+  }
+
+  /**
+   * Read the scope, and fold the legacy separate domain map into it.
+   *
+   * The two keys exist so a user can flip global/domain without losing the
+   * host list; the legacy key is read but never written from here.
+   */
+  private async loadScope(): Promise<void> {
+    const [scope, domains] = await Promise.all([
+      storage.getItem<AutoScopeState["scope"]>(AUTO_SCOPE_KEY),
+      storage.getItem<Record<string, boolean>>(AUTO_DOMAINS_KEY),
+    ]);
+    this.scopeState = {
+      scope: scope === "domain" ? "domain" : "global",
+      domains: domains ?? this.scopeState?.domains ?? {},
+    };
+  }
+
+  /** Start or stop the observer to match the scope for this host. */
+  private reevaluateScope(): void {
+    const allowed = this.hostAllowed();
+    if (allowed && !this.isEnabled) {
+      void this.start();
+    } else if (!allowed && this.isEnabled) {
+      dlog("scope", "host not allowed, stopping", { host: location.hostname });
+      this.stop();
+    }
+  }
+
+  /**
+   * Local mode is always allowed: the queue is shared with the manual pill, and
+   * the pill must keep working on any site the user chooses to translate by
+   * hand. Scope governs only the automatic observer.
+   */
+  private hostAllowed(): boolean {
+    if (!this.scopeState) return true;
+    return allowsHost(this.scopeState, location.hostname);
   }
 
   /** Manual pill path: shares the same queue even when auto is off. */
@@ -275,6 +469,15 @@ export class AutoTranslateOrchestrator {
 
   async start() {
     if (this.isEnabled) return;
+    // Scope gates the automatic observer only. A refused host stays untranslated
+    // until the user either adds it or translates a page by hand.
+    if (!this.hostAllowed()) {
+      dlog("scope", "auto-translate refused for host", {
+        host: location.hostname,
+        scope: this.scopeState?.scope,
+      });
+      return;
+    }
     this.isEnabled = true;
     this.activeRule = await resolveActiveSiteRule();
 
@@ -377,6 +580,14 @@ export class AutoTranslateOrchestrator {
       this.unwatchConcurrency();
       this.unwatchConcurrency = null;
     }
+    if (this.unwatchScope) {
+      this.unwatchScope();
+      this.unwatchScope = null;
+    }
+    if (this.unwatchDomains) {
+      this.unwatchDomains();
+      this.unwatchDomains = null;
+    }
   }
 
   private isQualifyingImage(img: MangaTargetElement): boolean {
@@ -388,17 +599,20 @@ export class AutoTranslateOrchestrator {
       }
     }
 
-    // Generic fallback: images or canvases must be strictly > 500px in both dimensions
+    // No rule selector: fall back to shape. Size alone is not enough — catalog
+    // covers are routinely larger than 500px in both dimensions, which is how
+    // auto-translate used to spend a chapter's budget on a homepage grid. A
+    // page spans the reading column; a cover is one cell of it.
     const naturalW = "naturalWidth" in img ? img.naturalWidth : img.width;
     const naturalH = "naturalHeight" in img ? img.naturalHeight : img.height;
     const clientW = img.clientWidth || img.offsetWidth;
     const clientH = img.clientHeight || img.offsetHeight;
 
-    if (naturalW > 0 && naturalH > 0) {
-      return naturalW > 500 && naturalH > 500;
-    }
+    const width = naturalW > 0 ? naturalW : clientW;
+    const height = naturalH > 0 ? naturalH : clientH;
+    if (width <= 0 || height <= 0) return false;
 
-    return clientW > 500 && clientH > 500;
+    return looksLikeReaderPage(width, height, document.documentElement.clientWidth);
   }
 
   private observeImage(img: MangaTargetElement) {
@@ -419,7 +633,7 @@ export class AutoTranslateOrchestrator {
       this.observedImages.delete(img);
     }
 
-    if (Registry.isPending(k) || Registry.getStatus(k) === "done") {
+    if (Registry.isPendingKey(k) || Registry.statusOfKey(k) === "done") {
       this.observedSourceKeys.set(img, k);
       this.observedImages.add(img);
       return;
@@ -481,18 +695,29 @@ export class AutoTranslateOrchestrator {
             this.isNearViewport(img),
         ),
       );
-      if (matchingImgs.length > 0) return;
+      if (matchingImgs.length > 0) {
+        // Site rule already scoped the page: everything it matched is a page.
+        Registry.setDetectedCount(matchingImgs.length);
+        return;
+      }
     }
 
-    // Fallback scan across all document images & canvases
+    // Fallback scan across all document images & canvases.
+    //
+    // `detected` counts only qualifying pages here. A raw `img, canvas` count
+    // includes icons, logos and spacer canvases, which would inflate the
+    // readout and make a finished chapter look permanently incomplete.
     const allImages = document.querySelectorAll<MangaTargetElement>("img, canvas");
-    allImages.forEach((img) =>
+    let qualifying = 0;
+    allImages.forEach((img) => {
+      if (this.isQualifyingImage(img)) qualifying++;
       this.observeImageWithRefresh(
         img,
         refreshVisibleCanvases &&
           img instanceof HTMLCanvasElement &&
           this.isNearViewport(img),
-      ),
-    );
+      );
+    });
+    Registry.setDetectedCount(qualifying);
   }
 }

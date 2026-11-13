@@ -63,18 +63,28 @@ export function normalizeProviderUsageSummary(
 
 let writeQueue: Promise<void> = Promise.resolve();
 
+/**
+ * Add one increment to a running total, or keep the total unknown.
+ *
+ * A field stays unknown only while it has never been observed. Once a request
+ * reports nothing for a category, the previous total is *kept*, not nulled:
+ *
+ *   - Gemini omits `thoughtsTokenCount` when the model did no thinking, and
+ *     OpenAI-compatible endpoints omit cached-input details on most replies.
+ *     Treating one absent field as "this metric is unknowable forever" wiped
+ *     counters that had already been measured and made the usage panel look
+ *     permanently dead — the request count climbed while every token field
+ *     stayed "Unknown".
+ *   - The total stays honest: it is still a sum of provider-reported numbers.
+ *     It only stops claiming to be a complete sum, which `metricComplete`
+ *     below records per bucket.
+ */
 function addMetric(
   total: number | null,
   increment: number | undefined,
-  previousRequests: number,
 ): number | null {
-  if (
-    typeof increment !== "number" ||
-    !Number.isFinite(increment) ||
-    increment < 0 ||
-    (total === null && previousRequests > 0)
-  ) {
-    return null;
+  if (typeof increment !== "number" || !Number.isFinite(increment) || increment < 0) {
+    return total;
   }
   return (total ?? 0) + increment;
 }
@@ -104,20 +114,18 @@ export function recordProviderUsage(
     const nextRequests = bucket.apiRequests + Math.trunc(requests);
     const next: ProviderUsageBucket = {
       apiRequests: nextRequests,
-      inputTokens: addMetric(bucket.inputTokens, usage?.inputTokens, bucket.apiRequests),
-      outputTokens: addMetric(bucket.outputTokens, usage?.outputTokens, bucket.apiRequests),
-      thinkingTokens: addMetric(bucket.thinkingTokens, usage?.thinkingTokens, bucket.apiRequests),
+      inputTokens: addMetric(bucket.inputTokens, usage?.inputTokens),
+      outputTokens: addMetric(bucket.outputTokens, usage?.outputTokens),
+      thinkingTokens: addMetric(bucket.thinkingTokens, usage?.thinkingTokens),
       cachedInputTokens: addMetric(
         bucket.cachedInputTokens,
         usage?.cachedInputTokens,
-        bucket.apiRequests,
       ),
       estimatedCostUsd:
         mode === "gemini"
           ? addMetric(
               bucket.estimatedCostUsd,
               estimateGeminiPaidCostUsd(modelId, usage) ?? undefined,
-              bucket.apiRequests,
             )
           : null,
       updatedAt: Date.now(),

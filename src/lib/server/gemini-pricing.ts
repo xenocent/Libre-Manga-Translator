@@ -17,7 +17,11 @@ export function geminiPaidTokenRates(
   modelId: string,
   at = new Date(),
 ): GeminiTokenRates | undefined {
-  if (modelId === "gemini-3.8-flash" || modelId === "gemini-3.6-flash") {
+  if (
+    modelId === "gemini-3.8-flash" ||
+    modelId === "gemini-3.7-flash" ||
+    modelId === "gemini-3.6-flash"
+  ) {
     return at.getTime() >= RATE_CHANGE_2027
       ? {
           inputPerMillion: 1.5,
@@ -29,6 +33,19 @@ export function geminiPaidTokenRates(
           outputPerMillion: 3.75,
           cachedInputPerMillion: 0.075,
         };
+  }
+  if (modelId === "gemini-3.5-flash") {
+    // ponytail: 3.5-flash has no published rate on aistudio.google.com/docs/pricing
+    // as of 2026-11-13. Priced at the prior-generation flash tier (3.6's
+    // introductory rate) because Google prices flash by generation and 3.8
+    // already shares 3.6's rate. Upgrade path: replace with the published rate
+    // when Google lists it, or drop the model from `configs.geminiModels` if it
+    // is deprecated.
+    return {
+      inputPerMillion: 0.75,
+      outputPerMillion: 3.75,
+      cachedInputPerMillion: 0.075,
+    };
   }
   if (modelId === "gemini-3.5-flash-lite") {
     return {

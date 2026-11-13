@@ -1,8 +1,9 @@
 <script lang="ts">
   import { getDebugLogs, clearDebugLogs } from "@/entrypoints/content/debug";
-  import { Check, Copy, Download, LoaderCircle, RefreshCw, Trash2, TriangleAlert } from "lucide-svelte";
+  import { Check, Copy, Download, FileText, LoaderCircle, RefreshCw, Trash2, TriangleAlert } from "lucide-svelte";
 
   const DEBUG_ENABLED_KEY = "local:debug-enabled";
+  const REVEAL_DEBUG_FILE = "REVEAL_DEBUG_FILE";
 
   let {
     // Compact mode (System tab default): toggle row only, plus an
@@ -27,9 +28,35 @@
   let debugEnabled = $state(false);
   let togglingEnabled = $state(false);
   let internalOpen = $state(false);
+  let revealingLog = $state(false);
+  let revealFailed = $state(false);
 
   // Controlled when the parent swaps views; uncontrolled otherwise.
   const listOpen = $derived(showList ?? internalOpen);
+
+  /**
+   * Opens the on-disk timeline log in the browser's download list.
+   *
+   * The in-extension panel only records finished pages, so the exact case this
+   * exists for — a page wedged mid-pipeline — never appears here. The timeline
+   * is flushed to a per-page file in the download folder instead; this button
+   * is how you get to it without hunting Downloads yourself.
+   */
+  async function revealTimelineFile() {
+    revealingLog = true;
+    revealFailed = false;
+    try {
+      const res = await browser.runtime.sendMessage({
+        type: REVEAL_DEBUG_FILE,
+      });
+      if (!res?.success) revealFailed = true;
+    } catch {
+      revealFailed = true;
+    } finally {
+      revealingLog = false;
+      if (revealFailed) setTimeout(() => (revealFailed = false), 4000);
+    }
+  }
 
   async function loadLogs() {
     loading = true;
@@ -136,6 +163,26 @@
     </span>
   </div>
   <div class="flex items-center gap-2 shrink-0">
+    {#if debugEnabled}
+      <button
+        type="button"
+        onclick={revealTimelineFile}
+        disabled={revealingLog}
+        class="btn-ghost !py-1.5 !px-2 !text-[11px] flex items-center gap-1"
+        title="Open the on-disk timeline log for this page. Shows transitions the in-extension panel cannot record, including a page wedged mid-pipeline."
+      >
+        {#if revealingLog}
+          <LoaderCircle size={12} class="animate-spin" />
+        {:else}
+          <FileText size={12} />
+        {/if}
+        {#if revealFailed}
+          <span class="text-[var(--accent-rose)]">No file yet</span>
+        {:else}
+          Log file
+        {/if}
+      </button>
+    {/if}
     {#if compact && debugEnabled && !listOpen}
       <button
         type="button"

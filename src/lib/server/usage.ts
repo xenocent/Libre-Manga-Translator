@@ -29,16 +29,32 @@ function hasUsage(value: ProviderTokenUsage): boolean {
   return Object.values(value).some((count) => count !== undefined);
 }
 
-/** Read only the token counts Gemini actually returned in usageMetadata. */
+/**
+ * Read the token counts Gemini reported in `usageMetadata`.
+ *
+ * Gemini omits a counter entirely when it is zero: a reply without thinking
+ * carries no `thoughtsTokenCount`, and a request without cached context
+ * carries no `cachedContentTokenCount`. Reading those omissions as "unknown"
+ * made `estimateGeminiPaidCostUsd` bail out on every single page, because it
+ * requires all four classes before it will price anything — the usage panel
+ * showed requests climbing next to a permanently "Unknown" cost.
+ *
+ * Omitted billing categories are therefore read as 0 (nothing was billed),
+ * while the input/output counts stay strictly provider-reported: a missing
+ * prompt or candidate count still leaves the whole record unknown.
+ */
 export function normalizeGeminiUsageMetadata(
   metadata: unknown,
 ): ProviderTokenUsage | undefined {
   const raw = asRecord(metadata);
+  const inputTokens = tokenCount(raw.promptTokenCount);
+  const outputTokens = tokenCount(raw.candidatesTokenCount);
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
   const usage: ProviderTokenUsage = {
-    inputTokens: tokenCount(raw.promptTokenCount),
-    outputTokens: tokenCount(raw.candidatesTokenCount),
-    thinkingTokens: tokenCount(raw.thoughtsTokenCount),
-    cachedInputTokens: tokenCount(raw.cachedContentTokenCount),
+    inputTokens,
+    outputTokens,
+    thinkingTokens: tokenCount(raw.thoughtsTokenCount) ?? 0,
+    cachedInputTokens: tokenCount(raw.cachedContentTokenCount) ?? 0,
   };
   return hasUsage(usage) ? usage : undefined;
 }

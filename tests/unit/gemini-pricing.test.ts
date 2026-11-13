@@ -49,9 +49,21 @@ describe("Gemini paid-tier price estimates", () => {
     ).toBeCloseTo(2.8);
   });
 
+  it("prices the selectable 3.7 and 3.5 flash models, not just the default", () => {
+    // Cost used to read "Unknown" for any model without an explicit entry, so
+    // users who picked a non-default flash model got working counters and no
+    // cost at all. Every selectable `configs.geminiModels` id must resolve.
+    const cost = (id: string) =>
+      estimateGeminiPaidCostUsd(id, fullUsage, new Date("2026-11-07T00:00:00Z"));
+    expect(cost("gemini-3.7-flash")).not.toBeNull();
+    expect(cost("gemini-3.5-flash")).not.toBeNull();
+  });
+
   it("does not guess a rate or fill missing token categories", () => {
+    // A truly unknown model id must stay null rather than silently pricing as a
+    // flash tier — a wrong price is worse than no price.
     expect(
-      estimateGeminiPaidCostUsd("gemini-3.7-flash", fullUsage),
+      estimateGeminiPaidCostUsd("gemini-nonexistent-flash", fullUsage),
     ).toBeNull();
     expect(
       estimateGeminiPaidCostUsd("gemini-3.8-flash", {
