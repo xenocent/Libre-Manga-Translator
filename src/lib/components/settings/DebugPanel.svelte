@@ -35,12 +35,14 @@
   const listOpen = $derived(showList ?? internalOpen);
 
   /**
-   * Opens the on-disk timeline log in the browser's download list.
+   * Downloads the timeline log for this page and opens it in the download list.
    *
    * The in-extension panel only records finished pages, so the exact case this
    * exists for — a page wedged mid-pipeline — never appears here. The timeline
-   * is flushed to a per-page file in the download folder instead; this button
-   * is how you get to it without hunting Downloads yourself.
+   * buffer is kept in extension storage; this writes it to a per-page file in
+   * the download folder and surfaces it. It runs only on click: the log is
+   * downloadable, never auto-downloaded, so nothing appears in the shelf unless
+   * you ask for it.
    */
   async function revealTimelineFile() {
     revealingLog = true;

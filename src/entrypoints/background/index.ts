@@ -1069,10 +1069,34 @@ export default defineBackground(() => {
       return true;
     }
 
+    // "Log file" button: produce the timeline file on demand and reveal it.
+    //
+    // The timeline buffer lives in `local:debug-timeline` and is only ever
+    // written to disk when the user asks. The content script never writes here
+    // on a timer or on page-hide — every `downloads.download` call is a visible
+    // download event, and automatic ones made files appear unbidden (the
+    // reported "sudden multiple downloads on page open"). One click = one
+    // explicit download, which is what "downloadable, not automatic" means.
     if (msg.type === "REVEAL_DEBUG_FILE") {
       keepAliveWhile(
-        revealFileLog(typeof msg.data?.filename === "string" ? msg.data.filename : undefined)
-          .then((ok) => ({ success: ok }))
+        (async () => {
+          let filename: string | undefined =
+            typeof msg.data?.filename === "string" ? msg.data.filename : undefined;
+          let content: string | undefined = typeof msg.data?.content === "string" ? msg.data.content : undefined;
+          // No content passed → read the stored timeline copy.
+          if (content === undefined) {
+            try {
+              const stored = await storage.getItem<string>("local:debug-timeline");
+              if (typeof stored === "string") content = stored;
+            } catch {
+              // fall through: no content → reveal existing file if any
+            }
+          }
+          if (typeof content === "string") {
+            await writeFileLog(content, { filename });
+          }
+          return revealFileLog(filename).then((ok) => ({ success: ok }));
+        })()
           .catch(() => ({ success: false })),
       )
         .then(respond)
