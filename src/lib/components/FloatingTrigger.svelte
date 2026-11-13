@@ -29,6 +29,15 @@
   let visible = $state(false);
   let status = $state<"idle" | "translating" | "translated">("idle");
   let progressText = $state("Detecting text…");
+  // Aggregate pipeline readout, kept current by `lmt:queue-progress`. When no
+  // single page is pinned (auto-translate with nothing hovered) the pill shows
+  // THIS instead of one frozen page label — previously `handleProgress` returned
+  // early without a hover target, so the pill stuck on "Detecting text…" over a
+  // page the queue had long since finished.
+  let aggActive = $state(0);
+  let aggQueued = $state(0);
+  let aggCompleted = $state(0);
+  let aggDetected = $state(0);
   let targetImg = $state<MangaTargetElement | null>(null);
   let targetSource = "";
   // Pipeline-active image shown without hover (manual click optimistic or
@@ -39,6 +48,24 @@
   let dragOffset = $state<{ x: number; y: number } | null>(null);
   let isDraggingTrigger = $state(false);
   let triggerDragStart: { mouseX: number; mouseY: number; initialX: number; initialY: number } | null = null;
+
+  // What the pill displays. A pinned page (hovered, or the one the user clicked)
+  // shows that page's own stage; otherwise the aggregate chapter progress shows,
+  // so auto-translate with nothing hovered still reports real movement instead of
+  // freezing on a single stale "Detecting text…" label.
+  function aggregateText(): string {
+    const running = aggActive + aggQueued;
+    if (running === 0 && aggCompleted === 0) return "Detecting text…";
+    if (running > 0) {
+      return `${aggActive}+${aggQueued} · ${aggCompleted}/${aggDetected}`;
+    }
+    return `${aggCompleted}/${aggDetected} done`;
+  }
+
+  let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
+  let pillText = $derived(
+    status === "translating" && targetImg ? progressText : aggregateText(),
+  );
 
   // Cached reader container element — resolved lazily from the selector prop
   // so isPageLike doesn't call closest() on every candidate every mouseover.
@@ -563,6 +590,21 @@
       }
     }
 
+    // Live aggregate progress for the pill when no single page is pinned (auto
+    // translate never hovers). The queue publishes active/queued; the registry
+    // publishes completed/detected. Kept at module scope: the module-level
+    // `$derived` pill values read these, so they cannot live inside onMount.
+    function handleQueueProgress(e: Event) {
+      const detail = (
+        e as CustomEvent<{ active?: number; queued?: number; completed?: number; detected?: number }>
+      ).detail;
+      if (!detail) return;
+      aggActive = detail.active ?? aggActive;
+      aggQueued = detail.queued ?? aggQueued;
+      aggCompleted = detail.completed ?? aggCompleted;
+      aggDetected = detail.detected ?? aggDetected;
+    }
+
     function handleTranslationStatus(e: Event) {
       const detail = (e as CustomEvent<{ src?: string; status?: string }>).detail;
       if (!detail?.src || !detail?.status) return;
@@ -614,6 +656,7 @@
     document.addEventListener("scroll", handleScrollRaw, { passive: true, capture: true });
     document.addEventListener("lmt:mode-change", handleModeChange, { passive: true });
     document.addEventListener("lmt:progress", handleProgress, { passive: true });
+    document.addEventListener("lmt:queue-progress", handleQueueProgress, { passive: true });
     document.addEventListener("lmt:translation-status", handleTranslationStatus, { passive: true });
 
     return () => {
@@ -627,6 +670,7 @@
       document.removeEventListener("scroll", handleScrollRaw, true);
       document.removeEventListener("lmt:mode-change", handleModeChange);
       document.removeEventListener("lmt:progress", handleProgress);
+      document.removeEventListener("lmt:queue-progress", handleQueueProgress);
       document.removeEventListener("lmt:translation-status", handleTranslationStatus);
       cancelHide();
       if (canvasRefreshTimer) {
@@ -684,12 +728,12 @@
       <button
         type="button"
         onclick={handleTriggerClick}
-        class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold tracking-wide transition-all cursor-pointer {status === 'translating' ? 'text-[var(--accent-cyan)] cursor-wait' : 'text-[var(--text-primary)] hover:text-[var(--accent-amber)] hover:shadow-[0_0_12px_var(--accent-amber-glow)]'}"
-        title={status === 'translating' ? progressText : 'Translate manga image'}
+        class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold tracking-wide transition-all cursor-pointer {(status === 'translating' || pillRunning) ? 'text-[var(--accent-cyan)] cursor-wait' : 'text-[var(--text-primary)] hover:text-[var(--accent-amber)] hover:shadow-[0_0_12px_var(--accent-amber-glow)]'}"
+        title={pillRunning ? pillText : 'Translate manga image'}
       >
-        {#if status === "translating"}
+        {#if status === "translating" || pillRunning}
           <LoaderCircle size={13} class="animate-spin text-[var(--accent-cyan)]" />
-          <span class="text-[11px] animate-pulse">{progressText}</span>
+          <span class="text-[11px] animate-pulse">{pillText}</span>
         {:else}
           <Sparkles size={13} class="text-[var(--accent-amber)]" />
           <span class="text-[11px]">Translate</span>
