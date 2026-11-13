@@ -66,6 +66,12 @@
   let pillText = $derived(
     status === "translating" && targetImg ? progressText : aggregateText(),
   );
+  // The pill stays up while the chapter pipeline runs, even if the pinned page
+  // scrolls off-screen. Previously `handleScrollRaw` set visible=false the moment
+  // the one pinned page left the viewport, which hid the pill during auto-translate
+  // — the queue kept working but the user saw nothing and read it as "stuck".
+  // When nothing is pinned and the queue is idle, fall back to normal visibility.
+  let pillVisible = $derived(visible || (pillRunning && aggActive + aggQueued > 0));
 
   // Cached reader container element — resolved lazily from the selector prop
   // so isPageLike doesn't call closest() on every candidate every mouseover.
@@ -695,7 +701,7 @@
 
 </script>
 
-{#if visible && status !== "translated"}
+{#if pillVisible && status !== "translated"}
   <!-- Pinned Floating Container -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
