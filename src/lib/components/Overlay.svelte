@@ -747,6 +747,31 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
   }
 
+  /**
+   * Persistent "translate again": drop the cached record, not just the
+   * in-memory inpaint cache.
+   *
+   * `handleBackToRefine` alone clears the inpainted base held in this overlay,
+   * but the persisted `PageCache` survives — so closing and re-clicking the pill
+   * replays the exact cached answer the user is trying to escape. This deletes
+   * the record for good (current key plus any legacy-format copies) and then
+   * reuses the refine flow, so the next run starts from detection.
+   */
+  async function handleRetranslate() {
+    if (mode !== "results") return;
+    const removed = await Registry.deletePageCache(originalSrc).catch((err) => {
+      console.warn("LMT: deletePageCache failed:", err);
+      return 0;
+    });
+    handleBackToRefine();
+    addToast(
+      removed > 0
+        ? "Cached translation cleared — adjust boxes, then Confirm to retranslate."
+        : "No cached record found — adjust boxes, then Confirm to retranslate.",
+      "info",
+    );
+  }
+
   function deleteActiveBox() {
     if (activeIndex !== null) {
       bboxes = bboxes.filter((_, i) => i !== activeIndex);
@@ -1405,6 +1430,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       mode="results"
       {showOriginal}
       onRefine={handleBackToRefine}
+      onRetranslate={handleRetranslate}
       onEditTranslations={openEditPanel}
       onExportJpg={saveJpg}
       onToggleOriginal={() => (showOriginal = !showOriginal)}

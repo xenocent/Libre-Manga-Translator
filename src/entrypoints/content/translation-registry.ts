@@ -75,6 +75,39 @@ export async function findLegacyPageCache(
 }
 
 /**
+ * Deletes every persisted record for this page, current and legacy format.
+ *
+ * Returns the number of records removed. Never enumerates `storage.local` —
+ * each record is a multi-megabyte data URL, so deletion is by exact key only:
+ * the current cache key plus the same bounded probe set `findLegacyPageCache`
+ * uses.
+ *
+ * Backs the overlay's persistent "translate again" control: the in-session
+ * retranslate (`handleBackToRefine`) already clears the in-memory inpaint cache,
+ * but without this the stale record replays on the next page visit.
+ */
+export async function deletePageCache(originalSrc: string): Promise<number> {
+  const current = await resolveCacheKey(originalSrc);
+  const { seriesName, chapterId } = await getSiteRule();
+  const targetLang =
+    (await storage.getItem<string>("sync:target-lang")) ?? DefaultConfig.targetLang;
+  const imgHash = quickHash(originalSrc);
+  const name = `${seriesName}-${chapterId}`;
+  const keys: string[] = [current];
+  for (let page = 0; page <= LEGACY_PROBE_PAGES; page++) {
+    keys.push(`${PAGE_CACHE_PREFIX}${targetLang}-${name}-p${page}-${imgHash}`);
+  }
+  keys.push(`${PAGE_CACHE_PREFIX}${targetLang}-${name}-${imgHash}`);
+
+  const existing = await browser.storage.local.get(keys);
+  const present = keys.filter((k) => existing[k] !== undefined);
+  if (present.length > 0) {
+    await browser.storage.local.remove(present);
+  }
+  return present.length;
+}
+
+/**
  * ── Key-level accessors ──────────────────────────────────────────────────
  * `pageSourceKeyOf` HASHES its input, so it is not idempotent: passing an
  * already-derived key to a `src`-taking function looks up `hash(hash(src))`,

@@ -16,6 +16,7 @@
     PenLine,
     Download,
     Image,
+    RefreshCw,
   } from "lucide-svelte";
 
   interface Props {
@@ -40,6 +41,7 @@
     onRedo?: () => void;
     onClose?: () => void;
     onRefine?: () => void;
+    onRetranslate?: () => void;
     onEditTranslations?: () => void;
     onExportJpg?: () => void;
     onToggleOriginal?: () => void;
@@ -67,6 +69,7 @@
     onRedo,
     onClose,
     onRefine,
+    onRetranslate,
     onEditTranslations,
     onExportJpg,
     onToggleOriginal,
@@ -329,6 +332,16 @@
         class="w-8 h-8 inline-flex items-center justify-center rounded-[4px] p-0 shrink-0 text-[var(--text-muted)] hover:text-[var(--accent-amber)] hover:bg-[var(--surface-panel)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-line)]"
       >
         <BoxSelect size={16} />
+      </button>
+
+      <!-- Translate Again (clears the cached result for this page) -->
+      <button
+        type="button"
+        onclick={trapClick(onRetranslate)}
+        title="Translate again — clears the cached translation so the next run starts fresh"
+        class="w-8 h-8 inline-flex items-center justify-center rounded-[4px] p-0 shrink-0 text-[var(--text-muted)] hover:text-[var(--accent-cyan)] hover:bg-[var(--surface-panel)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-line)]"
+      >
+        <RefreshCw size={16} />
       </button>
 
       <!-- Edit Translations -->
