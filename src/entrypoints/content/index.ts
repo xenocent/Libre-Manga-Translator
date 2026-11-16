@@ -934,11 +934,32 @@ export default defineContentScript({
                     }
                   }
 
-                  const translatedSrc = await drawTranslations(
-                    cached.url,
-                    bboxes,
-                    translations,
-                  );
+                  // Paint step: the last thing before the translated image
+                  // reaches the overlay. A failure or hang here is invisible to
+                  // every other log — Gemini returned, translate answered, but
+                  // nothing ever renders. Record it explicitly.
+                  recordTimeline("render", "paint start", {
+                    page: srcKey(originalSrc).slice(0, 20),
+                    boxes: bboxes.length,
+                  });
+                  let translatedSrc: string;
+                  try {
+                    translatedSrc = await drawTranslations(
+                      cached.url,
+                      bboxes,
+                      translations,
+                    );
+                  } catch (err) {
+                    recordTimeline("render", "paint FAILED", {
+                      page: srcKey(originalSrc).slice(0, 20),
+                      err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+                    });
+                    throw err;
+                  }
+                  recordTimeline("render", "paint done", {
+                    page: srcKey(originalSrc).slice(0, 20),
+                    hasUrl: !!translatedSrc,
+                  });
                   translatedSrcMap.set(srcKey(translatedSrc), originalSrc);
 
                   // Persist edited translations and bboxes so cache re-open shows them
