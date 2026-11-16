@@ -111,6 +111,12 @@ export const DefaultConfig = {
   // last-resort guard `timeoutGuardGraceMs` later. Resolution lives in
   // `timeouts.ts` so the numbers stay unit-testable.
   timeoutShortJobMs: 90_000,
+  /**
+   * Detection budget. A single forward pass should answer in a few seconds;
+   * capping it hard is what turns "stuck on Detecting text" into a visible
+   * error the user can retry, instead of a spinner that outlives its use.
+   */
+  timeoutDetectMs: 30_000,
   timeoutLocalTranslateMs: 480_000,
   timeoutApiTranslateMs: 180_000,
   /**

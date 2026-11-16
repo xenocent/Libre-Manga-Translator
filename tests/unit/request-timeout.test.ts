@@ -74,9 +74,15 @@ describe("resolveJobTimeout", () => {
     ).toBe(DefaultConfig.timeoutInpaintMs);
   });
 
-  it("falls back to the short budget for single calls", () => {
+  it("caps detection at its own tight budget", () => {
+    // "Stuck on Detecting text" is the worst failure to diagnose, so detect
+    // gets a hard cap well under the short-job budget. It must stay distinct
+    // from the single-call budget so the cap can't regress silently.
     expect(resolveJobTimeout({ type: "DETECT_BBOX" })).toBe(
-      DefaultConfig.timeoutShortJobMs,
+      DefaultConfig.timeoutDetectMs,
+    );
+    expect(resolveJobTimeout({ type: "DETECT_BBOX", boxes: 50 })).toBe(
+      DefaultConfig.timeoutDetectMs,
     );
     expect(resolveJobTimeout({ type: "MAKE_SITE_RULE_AI" })).toBe(
       DefaultConfig.timeoutShortJobMs,

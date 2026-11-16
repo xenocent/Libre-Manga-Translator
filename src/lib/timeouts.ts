@@ -50,7 +50,15 @@ export function resolveJobTimeout({
     return DefaultConfig.timeoutGeminiTranslateMs;
   }
 
-  // DETECT_BBOX, MAKE_SITE_RULE_AI and every other single short call.
+  // DETECT_BBOX gets its own tight budget: detection is a single forward pass
+  // that should answer in a few seconds. A page parked here is the "stuck on
+  // Detecting text" case, so cap it hard instead of sharing the 90s short-job
+  // budget. MAKE_SITE_RULE_AI and other short calls keep the short budget.
+  if (type === "DETECT_BBOX") {
+    return DefaultConfig.timeoutDetectMs;
+  }
+
+  // MAKE_SITE_RULE_AI and every other single short call.
   return DefaultConfig.timeoutShortJobMs;
 }
 

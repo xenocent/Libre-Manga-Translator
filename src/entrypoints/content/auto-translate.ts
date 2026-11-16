@@ -598,21 +598,19 @@ export class AutoTranslateOrchestrator {
     if (this.activeRule?.imageSelector) {
       try {
         if (img.matches(this.activeRule.imageSelector)) {
-          // Site selectors are trusted for classification but we still enforce a
-          // minimum size AND a manga-page aspect ratio. A banner ad (728×90
-          // leaderboard, 300×250 rect) or logo that happens to match the site
-          // rule's selector would otherwise start detection on every stats page.
-          // Manga pages are portrait or square; banners are landscape.
+          // Site selectors are trusted — the maintainer declares "these are
+          // pages" via imageSelector, so we only guard against degenerate
+          // elements (zero-size placeholders, 1×1 trackers) with a floor, not
+          // an aspect-ratio gate. The aspect check I tried here rejected
+          // landscape-format canvas readers (manga-one) entirely, returning
+          // 0/0/0/0 — the selector is the signal, not the element's shape.
           const clientW = img.clientWidth || img.offsetWidth;
           const clientH = img.clientHeight || img.offsetHeight;
           const natW = "naturalWidth" in img ? img.naturalWidth : clientW;
           const natH = "naturalHeight" in img ? img.naturalHeight : clientH;
           const width = Math.max(natW, clientW);
           const height = Math.max(natH, clientH);
-          if (width < 200 || height < 200) return false;
-          // Portrait or near-square: height >= width × 0.8. Landscape banners
-          // (ratio < 1) are rejected. A typical manga page is 2:3 (0.67).
-          return height >= width * 0.8;
+          return width >= 200 && height >= 200;
         }
       } catch {
         // Selector syntax error fallback
