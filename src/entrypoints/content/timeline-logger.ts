@@ -38,7 +38,14 @@ async function flushNow(): Promise<void> {
   try {
     await storage.setItem(TIMELINE_STORAGE_KEY, text);
   } catch (err) {
-    console.warn("LMT: timeline storage write failed:", err);
+    // "Extension context invalidated" fires when the extension reloads while an
+    // old content script is still alive — the write is expected to fail there
+    // and there is nothing to recover, so stay quiet instead of spamming the
+    // console on every flush tick.
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (!/invalidat/i.test(message)) {
+      console.warn("LMT: timeline storage write failed:", err);
+    }
   }
 }
 

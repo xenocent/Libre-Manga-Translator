@@ -63,14 +63,16 @@
   }
 
   let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
-  // Show the aggregate only when the chapter queue actually has MULTIPLE pages
-  // in motion, or when nothing is pinned (auto-translate, nothing hovered).
-  // A lone in-flight page (manual translate on one image) has no queue to
-  // summarise, so it keeps its own per-page stage — "1+0 · 2/1" on a single
-  // manual page was noise. Threshold is >1 precisely so a single manual page
-  // falls through to the per-page label.
+  // Per-page `progressText` can freeze on "Detecting text…" when its overlay is
+  // slow to mount, emits under a rekeyed src, or fails without ever firing a
+  // matching lmt:progress (handleProgress guards on targetImg + src match). So
+  // when the pinned page's label is STILL the untouched default but the chapter
+  // queue shows real movement, prefer the aggregate — it is always live. A
+  // single manual page that HAS progressed (or has no queue movement) keeps its
+  // per-page label, so "1+0 · 2/1" doesn't come back on lone pages.
+  const PROGRESS_PLACEHOLDER = "Detecting text…";
   let pillText = $derived(
-    aggActive + aggQueued > 1 || (!targetImg && aggActive + aggQueued > 0)
+    progressText === PROGRESS_PLACEHOLDER && aggActive + aggQueued > 0
       ? aggregateText()
       : status === "translating" && targetImg
         ? progressText
@@ -88,11 +90,14 @@
   // the queue-progress-only case.
   let aggOnly = $derived(pillVisible && !targetImg);
   $effect(() => {
-    if (aggOnly) {
-      // top-right, 16px margin — same corner the pill drag defaults to.
-      x = window.innerWidth - 140;
-      y = 20;
-    }
+    if (!aggOnly) return;
+    // Only write when the values actually differ. Assigning unconditionally
+    // re-read x/y inside the effect, which re-triggers it every run and blew
+    // past Svelte's update-depth limit (effect_update_depth_exceeded).
+    const targetX = window.innerWidth - 140;
+    const targetY = 20;
+    if (x !== targetX) x = targetX;
+    if (y !== targetY) y = targetY;
   });
 
   // Cached reader container element — resolved lazily from the selector prop
