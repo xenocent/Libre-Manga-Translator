@@ -681,7 +681,37 @@ export class AutoTranslateOrchestrator {
         this.observeImage(img);
       };
       img.addEventListener("load", onLoad, { once: true });
+    } else if (img instanceof HTMLCanvasElement && this.isNearViewport(img)) {
+      // Canvas dimensions can lag the scroll: a fast-scroll into a chapter
+      // observes a canvas whose width/height are still 0 (the reader hasn't
+      // painted that page yet). Without a recheck the canvas is skipped and
+      // never enqueued — the "fast scroll misses pages" race. Poll briefly
+      // for readiness; the observer picks it up once dimensions land.
+      this.observedSourceKeys.set(img, k);
+      this.waitForCanvasReady(img, k);
     }
+  }
+
+  /**
+   * Re-checks a not-yet-rendered canvas a few times before giving up. Bounded:
+   * gives up after ~2s so a permanently blank canvas doesn't hold a poll slot.
+   * Key is re-derived on each attempt because the reader may swap the canvas src
+   * mid-wait, which changes its identity.
+   */
+  private waitForCanvasReady(img: HTMLCanvasElement, enqueuedKey: string, attempt = 0): void {
+    if (!this.isEnabled || attempt >= 20) return; // ~2s at 100ms
+    if (!document.body.contains(img)) return;
+    if (img.width > 0 && img.height > 0) {
+      // Ready now — re-run the observe path so the IntersectionObserver picks
+      // it up. The key may have changed if the reader recycled the element.
+      this.observedSourceKeys.delete(img);
+      this.observedImages.delete(img);
+      this.observeImageWithRefresh(img, false);
+      return;
+    }
+    setTimeout(() => {
+      this.waitForCanvasReady(img, enqueuedKey, attempt + 1);
+    }, 100);
   }
 
   private isNearViewport(img: MangaTargetElement): boolean {
