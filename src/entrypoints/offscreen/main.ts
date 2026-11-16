@@ -370,6 +370,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           undefined,
           gateOptions,
           ocrEngine,
+          signal,
         );
         const ocrResults = ocrOut.results;
         const ocr = performance.now() - tOcr;
@@ -416,6 +417,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           undefined,
           gateOptions,
           ocrEngine,
+          signal,
         );
         const ocr = performance.now() - tOcr;
         await yieldToMain();

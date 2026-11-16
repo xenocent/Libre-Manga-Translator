@@ -33,6 +33,8 @@ export interface OcrEngine {
       batchSize?: number;
       recImgHeight?: number;
       langGroup?: string;
+      /** Job deadline signal. Checked before each batch; aborts idle queue waits. */
+      signal?: AbortSignal;
     },
   ): Promise<SingleOcrResult[]>;
   release?(): Promise<void>;

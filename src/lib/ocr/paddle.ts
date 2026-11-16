@@ -93,12 +93,14 @@ export class PaddleOcrEngine implements OcrEngine {
       batchSize?: number;
       recImgHeight?: number;
       langGroup?: string;
+      signal?: AbortSignal;
     },
   ): Promise<SingleOcrResult[]> {
     const minConfidence = options?.minConfidence ?? DefaultConfig.ocrMinConfidence;
     const batchSize = options?.batchSize ?? DefaultConfig.ocrBatchSize;
     const recImgHeight = options?.recImgHeight ?? DefaultConfig.ocrRecImgHeight;
     const langGroup = options?.langGroup ?? "latin";
+    const signal = options?.signal;
     const repo = this.opts.repo ?? DefaultConfig.ocrRepo;
     const modelFile = (this.opts.modelPath ?? DefaultConfig.ocrModelPath)(langGroup);
     // Key on the resolved file: per-group packs swap, a fixed-file engine
@@ -116,33 +118,40 @@ export class PaddleOcrEngine implements OcrEngine {
       )
       .flat();
 
-    const result = await this.runExclusive(async () => {
-      if (this.session && this.currentLangGroup !== key) {
-        console.info(`[ocr] swapping rec model: ${this.currentLangGroup} → ${key}`);
-        await this.release();
-      }
+    const result = await this.runExclusive(
+      async () => {
+        if (signal?.aborted) {
+          throw new DOMException("Paddle OCR cancelled", "AbortError");
+        }
+        if (this.session && this.currentLangGroup !== key) {
+          console.info(`[ocr] swapping rec model: ${this.currentLangGroup} → ${key}`);
+          await this.release();
+        }
 
-      if (!this.session) {
-        console.info(`[ocr] loading rec model: ${repo}/${modelFile}`);
-        // The recognition stage follows the `ocr` toggle (LMT-028); the
-        // effective provider is logged once by `downloadArtifactHF`.
-        this.session = await downloadArtifactHF(repo, modelFile, false, {
-          gpu: gpuEnabledFor("ocr"),
-        });
-        this.currentLangGroup = key;
-      }
+        if (!this.session) {
+          console.info(`[ocr] loading rec model: ${repo}/${modelFile}`);
+          // The recognition stage follows the `ocr` toggle (LMT-028); the
+          // effective provider is logged once by `downloadArtifactHF`.
+          this.session = await downloadArtifactHF(repo, modelFile, false, {
+            gpu: gpuEnabledFor("ocr"),
+          });
+          this.currentLangGroup = key;
+        }
 
-      await this.ensureCharset(repo, langGroup);
+        await this.ensureCharset(repo, langGroup);
 
-      return await this.runBatches(
-        crops,
-        batchSize,
-        recImgHeight,
-        minConfidence,
-        bboxes.length,
-        langGroup,
-      );
-    });
+        return await this.runBatches(
+          crops,
+          batchSize,
+          recImgHeight,
+          minConfidence,
+          bboxes.length,
+          langGroup,
+          signal,
+        );
+      },
+      signal,
+    );
 
     // The consumer below indexes `result` by bbox position, so a length
     // change here would silently shift every bubble by one.
@@ -187,16 +196,23 @@ export class PaddleOcrEngine implements OcrEngine {
         })
         .flat();
 
-      const retryResults = await this.runExclusive(async () => {
-        return await this.runBatches(
-          retryCrops,
-          batchSize,
-          recImgHeight,
-          minConfidence,
-          failedIndexes.length,
-          langGroup,
-        );
-      });
+      const retryResults = await this.runExclusive(
+        async () => {
+          if (signal?.aborted) {
+            throw new DOMException("Paddle OCR cancelled", "AbortError");
+          }
+          return await this.runBatches(
+            retryCrops,
+            batchSize,
+            recImgHeight,
+            minConfidence,
+            failedIndexes.length,
+            langGroup,
+            signal,
+          );
+        },
+        signal,
+      );
 
       // `runBatches` allocates one slot per `slotCount` argument, so this
       // must hold exactly; a per-line return would put translated text in
@@ -229,6 +245,7 @@ export class PaddleOcrEngine implements OcrEngine {
     minConfidence: number,
     slotCount: number,
     langGroup: string,
+    signal?: AbortSignal,
   ): Promise<SingleOcrResult[]> {
     if (!this.session || !this.charset) {
       throw new Error("PaddleOCR session or charset not initialized");
@@ -241,6 +258,9 @@ export class PaddleOcrEngine implements OcrEngine {
     }));
 
     for (let start = 0; start < crops.length; start += batchSize) {
+      if (signal?.aborted) {
+        throw new DOMException("Paddle OCR cancelled mid-batch", "AbortError");
+      }
       await yieldToMain();
       const end = Math.min(crops.length, start + batchSize);
       const batchData = crops.slice(start, end);

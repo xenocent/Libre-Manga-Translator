@@ -76,6 +76,7 @@ export async function textRecognise(
   recImgHeight = DefaultConfig.ocrRecImgHeight,
   gateOptions?: { enabled?: boolean; force?: boolean },
   engineId?: string,
+  signal?: AbortSignal,
 ): Promise<OcrOutcome> {
   const mode: GateMode = gateModeFor(
     sourceLang,
@@ -179,6 +180,7 @@ export async function textRecognise(
         batchSize,
         recImgHeight,
         langGroup,
+        signal,
       },
     );
 
