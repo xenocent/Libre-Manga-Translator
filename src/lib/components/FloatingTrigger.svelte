@@ -63,8 +63,17 @@
   }
 
   let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
+  // When the chapter queue is running, always show the aggregate — even if the
+  // user is hovering a specific page. The per-page `progressText` freezes on
+  // "Detecting text…" during the claim→overlay-mount gap (no lmt:progress events
+  // yet), which made the pill look stuck. Only fall back to per-page text when
+  // the queue is idle (manual translate on a single page).
   let pillText = $derived(
-    status === "translating" && targetImg ? progressText : aggregateText(),
+    aggActive + aggQueued > 0
+      ? aggregateText()
+      : status === "translating" && targetImg
+        ? progressText
+        : aggregateText(),
   );
   // The pill stays up while the chapter pipeline runs, even if the pinned page
   // scrolls off-screen. Previously `handleScrollRaw` set visible=false the moment
@@ -72,6 +81,18 @@
   // — the queue kept working but the user saw nothing and read it as "stuck".
   // When nothing is pinned and the queue is idle, fall back to normal visibility.
   let pillVisible = $derived(visible || (pillRunning && aggActive + aggQueued > 0));
+  // When the pill is up with no pinned page (aggregate-only mode), anchor it to
+  // a fixed viewport corner so it doesn't render at stale/zero coordinates from
+  // a detached image. updatePosition() only runs for pinned targets; this covers
+  // the queue-progress-only case.
+  let aggOnly = $derived(pillVisible && !targetImg);
+  $effect(() => {
+    if (aggOnly) {
+      // top-right, 16px margin — same corner the pill drag defaults to.
+      x = window.innerWidth - 140;
+      y = 20;
+    }
+  });
 
   // Cached reader container element — resolved lazily from the selector prop
   // so isPageLike doesn't call closest() on every candidate every mouseover.
