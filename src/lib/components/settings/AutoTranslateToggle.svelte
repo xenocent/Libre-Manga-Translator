@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Zap, Globe } from "lucide-svelte";
+  import { Zap, Globe, Plus, X } from "lucide-svelte";
   import { storage } from "#imports";
   import {
     AUTO_DOMAINS_KEY,
@@ -23,17 +23,23 @@
   let scope = $state<AutoScope>("global");
   let domainEnabled = $state(false);
   let scopeLoaded = $state(false);
+  let domainList = $state<Record<string, boolean>>({});
+  let newDomain = $state("");
+  let showDomainList = $state(false);
+
+  async function loadState() {
+    const [storedScope, domains] = await Promise.all([
+      storage.getItem<AutoScope>(AUTO_SCOPE_KEY),
+      storage.getItem<Record<string, boolean>>(AUTO_DOMAINS_KEY),
+    ]);
+    scope = storedScope === "domain" ? "domain" : "global";
+    domainEnabled = domains?.[host] === true;
+    domainList = domains ?? {};
+    scopeLoaded = true;
+  }
 
   $effect(() => {
-    void (async () => {
-      const [storedScope, domains] = await Promise.all([
-        storage.getItem<AutoScope>(AUTO_SCOPE_KEY),
-        storage.getItem<Record<string, boolean>>(AUTO_DOMAINS_KEY),
-      ]);
-      scope = storedScope === "domain" ? "domain" : "global";
-      domainEnabled = domains?.[host] === true;
-      scopeLoaded = true;
-    })();
+    void loadState();
   });
 
   /**
@@ -48,10 +54,24 @@
   }
 
   async function toggleHost(enabled: boolean) {
-    const domains =
-      (await storage.getItem<Record<string, boolean>>(AUTO_DOMAINS_KEY)) ?? {};
-    const next = withHost({ scope, domains }, host, enabled);
+    const next = withHost({ scope, domains: domainList }, host, enabled);
     domainEnabled = enabled;
+    domainList = next.domains;
+    await storage.setItem(AUTO_DOMAINS_KEY, next.domains);
+  }
+
+  async function addDomain(domain: string) {
+    const clean = domain.trim().toLowerCase();
+    if (!clean) return;
+    const next = withHost({ scope, domains: domainList }, clean, true);
+    domainList = next.domains;
+    await storage.setItem(AUTO_DOMAINS_KEY, next.domains);
+    newDomain = "";
+  }
+
+  async function removeDomain(domain: string) {
+    const next = withHost({ scope, domains: domainList }, domain, false);
+    domainList = next.domains;
     await storage.setItem(AUTO_DOMAINS_KEY, next.domains);
   }
 </script>
@@ -127,7 +147,7 @@
                        ? 'text-[var(--accent-rose)] border-[var(--accent-rose)]/40 hover:bg-[var(--accent-rose)]/10'
                        : 'text-[var(--accent-emerald)] border-[var(--accent-emerald)]/40 hover:bg-[var(--accent-emerald)]/10'}"
             >
-              {domainEnabled ? "Remove from list" : "Add this site"}
+              {domainEnabled ? "Remove this site" : "Add this site"}
             </button>
           </div>
           {#if !domainEnabled}
@@ -135,6 +155,55 @@
               Not in the list — auto-translate stays off here until you add it.
             </p>
           {/if}
+
+          <!-- Domain list management -->
+          <div class="mt-2 pt-2 border-t border-[var(--border-faint)]">
+            <button
+              type="button"
+              onclick={() => (showDomainList = !showDomainList)}
+              class="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            >
+              {showDomainList ? "Hide" : "Manage"} saved sites ({Object.keys(domainList).length})
+            </button>
+            {#if showDomainList}
+              <div class="mt-1.5 space-y-1">
+                {#each Object.entries(domainList) as [domain] (domain)}
+                  <div class="flex items-center justify-between gap-1.5 bg-[var(--bg-void)] px-1.5 py-1 rounded border border-[var(--border-faint)]">
+                    <span class="font-mono text-[10px] text-[var(--text-primary)] truncate">{domain}</span>
+                    <button
+                      type="button"
+                      onclick={() => removeDomain(domain)}
+                      class="shrink-0 p-0.5 rounded text-[var(--text-dim)] hover:text-[var(--accent-rose)] transition-colors cursor-pointer"
+                      aria-label="Remove {domain}"
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                {:else}
+                  <p class="text-[10px] text-[var(--text-dim)] italic">No sites saved yet.</p>
+                {/each}
+              </div>
+
+              <!-- Add domain manually -->
+              <div class="mt-1.5 flex gap-1">
+                <input
+                  type="text"
+                  bind:value={newDomain}
+                  onkeydown={(e) => e.key === "Enter" && addDomain(newDomain)}
+                  placeholder="example.com"
+                  class="flex-1 bg-[var(--bg-void)] border border-[var(--border-faint)] rounded px-1.5 py-1 text-[10px] font-mono outline-none focus:border-[var(--accent-emerald)]/40"
+                />
+                <button
+                  type="button"
+                  onclick={() => addDomain(newDomain)}
+                  disabled={!newDomain.trim()}
+                  class="shrink-0 px-2 py-1 rounded bg-[var(--surface-panel)] border border-[var(--accent-emerald)]/40 text-[var(--accent-emerald)] text-[10px] font-medium hover:bg-[var(--accent-emerald)]/10 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Plus size={11} />
+                </button>
+              </div>
+            {/if}
+          </div>
         {/if}
       </div>
 

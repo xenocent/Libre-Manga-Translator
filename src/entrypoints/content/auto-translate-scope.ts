@@ -19,8 +19,14 @@ export interface AutoScopeState {
   domains: Record<string, boolean>;
 }
 
-/** What a first-time toggle should assume before the user is asked. */
-export const DEFAULT_SCOPE: AutoScopeState = { scope: "global", domains: {} };
+/**
+ * What a first-time toggle should assume before the user is asked.
+ *
+ * Defaults to `"domain"` with an empty allowlist: nothing auto-translates until
+ * the user explicitly adds a site. Global scope is opt-in, not the starting
+ * state — a fresh install on Instagram must not burn tokens on fashion photos.
+ */
+export const DEFAULT_SCOPE: AutoScopeState = { scope: "domain", domains: {} };
 
 /**
  * May this host translate on its own?

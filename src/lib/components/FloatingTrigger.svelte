@@ -266,7 +266,12 @@
     targetImg = img;
     if (switched) {
       targetSource = getElementSrc(img, true);
-      progressText = "Detecting text…";
+      // A page can be pending in the registry but not yet mounted its overlay
+      // (the gap between claim and mount). During that gap there are no
+      // lmt:progress events, so showing "Detecting text…" freezes the hover
+      // menu. Default to the aggregate chapter progress until the overlay
+      // mounts and starts emitting per-page updates.
+      progressText = aggregateText();
       status = targetSource && isRegistryPending(targetSource) ? "translating" : "idle";
     }
     if (auto) autoImg = img;

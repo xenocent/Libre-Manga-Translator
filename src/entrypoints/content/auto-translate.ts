@@ -422,8 +422,12 @@ export class AutoTranslateOrchestrator {
       storage.getItem<AutoScopeState["scope"]>(AUTO_SCOPE_KEY),
       storage.getItem<Record<string, boolean>>(AUTO_DOMAINS_KEY),
     ]);
+    // Default to "domain" (whitelist) when unset. Coercing an empty read to
+    // "global" meant a fresh install auto-translated EVERY tab — Instagram,
+    // Twitter, anything with a large image. The safe default is the allowlist:
+    // nothing runs until the user adds a site.
     this.scopeState = {
-      scope: scope === "domain" ? "domain" : "global",
+      scope: scope === "global" ? "global" : "domain",
       domains: domains ?? this.scopeState?.domains ?? {},
     };
   }

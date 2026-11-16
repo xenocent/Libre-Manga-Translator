@@ -7,8 +7,12 @@ import {
 } from "../../src/entrypoints/content/auto-translate-scope";
 
 describe("auto-translate scope", () => {
-  it("allows any host when the scope is global", () => {
-    expect(allowsHost(DEFAULT_SCOPE, "mangadex.org")).toBe(true);
+  it("defaults to domain scope — nothing auto-translates until a site is added", () => {
+    // A fresh install must not auto-translate every tab. The default is the
+    // whitelist: an unlisted host (Instagram, a random reader) is refused until
+    // the user explicitly opts in. Global scope is opt-in, not the start state.
+    expect(DEFAULT_SCOPE.scope).toBe("domain");
+    expect(allowsHost(DEFAULT_SCOPE, "mangadex.org")).toBe(false);
     expect(allowsHost({ scope: "global", domains: {} }, "example.com")).toBe(
       true,
     );
