@@ -1146,6 +1146,22 @@ export default defineContentScript({
             onTranslate: (img: MangaTargetElement) => {
               autoTranslator.enqueueManual(img);
             },
+            onStopPage: (img: MangaTargetElement) => {
+              // Try to cancel a queued page first; if it was already running,
+              // cancel the active slot instead.
+              if (!autoTranslator.cancelQueued(img)) {
+                autoTranslator.cancelActive(img);
+              }
+            },
+            onRestartPage: (img: MangaTargetElement) => {
+              autoTranslator.restart(img);
+            },
+            onStopAll: () => {
+              autoTranslator.stopAll();
+            },
+            onRestartAll: () => {
+              autoTranslator.restartAll();
+            },
             getOverlayMode: (img: MangaTargetElement) => {
               const raw = getTargetSource(img, true);
               const originalSrc = translatedSrcMap.get(srcKey(raw)) ?? raw;

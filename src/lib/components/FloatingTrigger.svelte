@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Sparkles, LoaderCircle, GripVertical } from "lucide-svelte";
+  import { Sparkles, LoaderCircle, GripVertical, Settings, Square, RotateCcw, OctagonX, ListRestart } from "lucide-svelte";
   import { isPending as isRegistryPending } from "@/entrypoints/content/translation-registry";
   import { getElementSrc, type MangaTargetElement } from "@/lib/canvas";
   import type { PillPosition } from "@/lib/adapters";
 
   let {
     onTranslate,
+    onStopPage,
+    onRestartPage,
+    onStopAll,
+    onRestartAll,
     getOverlayMode,
     getOverlayProgress,
     isSameSource,
@@ -14,6 +18,10 @@
     pillPosition,
   }: {
     onTranslate?: (img: MangaTargetElement) => void;
+    onStopPage?: (img: MangaTargetElement) => void;
+    onRestartPage?: (img: MangaTargetElement) => void;
+    onStopAll?: () => void;
+    onRestartAll?: () => void;
     getOverlayMode?: (img: MangaTargetElement) => "idle" | "translating" | "translated";
     getOverlayProgress?: (img: MangaTargetElement) => string;
     isSameSource?: (img: MangaTargetElement, src: string) => boolean;
@@ -48,6 +56,45 @@
   let dragOffset = $state<{ x: number; y: number } | null>(null);
   let isDraggingTrigger = $state(false);
   let triggerDragStart: { mouseX: number; mouseY: number; initialX: number; initialY: number } | null = null;
+
+  // Hover menu (gear) — shows the manual controls the user asked for: stop/restart
+  // the pinned page, and stop/restart the whole chapter queue. Opens on click so a
+  // stray hover can't yank it around; closes on outside click and Escape.
+  let menuOpen = $state(false);
+
+  function toggleMenu(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    menuOpen = !menuOpen;
+  }
+
+  function closeMenu() {
+    menuOpen = false;
+  }
+
+  function stopPage(e: MouseEvent) {
+    e.stopPropagation();
+    if (targetImg) onStopPage?.(targetImg);
+    closeMenu();
+  }
+
+  function restartPage(e: MouseEvent) {
+    e.stopPropagation();
+    if (targetImg) onRestartPage?.(targetImg);
+    closeMenu();
+  }
+
+  function stopAll(e: MouseEvent) {
+    e.stopPropagation();
+    onStopAll?.();
+    closeMenu();
+  }
+
+  function restartAll(e: MouseEvent) {
+    e.stopPropagation();
+    onRestartAll?.();
+    closeMenu();
+  }
 
   // What the pill displays. A pinned page (hovered, or the one the user clicked)
   // shows that page's own stage; otherwise the aggregate chapter progress shows,
@@ -677,6 +724,19 @@
 
     document.addEventListener("mouseover", handleMouseOver, { passive: true });
     document.addEventListener("mouseout", handleMouseOut, { passive: true });
+
+    // Close the hover menu on any outside click or Escape.
+    function handleMenuOutside(e: MouseEvent) {
+      if (!menuOpen) return;
+      const t = e.target;
+      if (t instanceof Element && t.closest(".lmt-floating-root")) return;
+      menuOpen = false;
+    }
+    function handleMenuKey(e: KeyboardEvent) {
+      if (menuOpen && e.key === "Escape") menuOpen = false;
+    }
+    document.addEventListener("click", handleMenuOutside, true);
+    document.addEventListener("keydown", handleMenuKey, true);
     document.addEventListener("click", scheduleTargetRefresh, true);
     document.addEventListener("keydown", scheduleTargetRefresh, true);
     document.addEventListener("wheel", scheduleTargetRefresh, {
@@ -697,6 +757,8 @@
     return () => {
       document.removeEventListener("mouseover", handleMouseOver);
       document.removeEventListener("mouseout", handleMouseOut);
+      document.removeEventListener("click", handleMenuOutside, true);
+      document.removeEventListener("keydown", handleMenuKey, true);
       document.removeEventListener("click", scheduleTargetRefresh, true);
       document.removeEventListener("keydown", scheduleTargetRefresh, true);
       document.removeEventListener("wheel", scheduleTargetRefresh, true);
@@ -747,7 +809,7 @@
       e.preventDefault();
     }}
   >
-    <div class="flex items-center rounded-lg bg-[var(--surface-panel)] border border-[var(--border-line)] shadow-lg overflow-hidden">
+    <div class="flex items-center rounded-lg bg-[var(--surface-panel)] border border-[var(--border-line)] shadow-lg overflow-visible">
       <!-- Drag Handle -->
       <button
         type="button"
@@ -774,6 +836,67 @@
           <span class="text-[11px]">Translate</span>
         {/if}
       </button>
+
+      <!-- Controls menu (gear) -->
+      <div class="relative flex items-center">
+        <button
+          type="button"
+          onclick={toggleMenu}
+          class="px-1.5 py-1 text-[var(--text-muted)] hover:text-[var(--accent-cyan)] cursor-pointer flex items-center transition-colors border-l border-[var(--border-line)]/50 {menuOpen ? 'text-[var(--accent-cyan)]' : ''}"
+          title="Controls — stop / restart"
+          aria-label="Controls"
+          aria-expanded={menuOpen}
+        >
+          <Settings size={13} class={menuOpen ? "rotate-90 transition-transform" : "transition-transform"} />
+        </button>
+
+        {#if menuOpen}
+          <div
+            class="absolute top-full right-0 mt-1.5 w-52 rounded-md bg-[var(--surface-panel)] border border-[var(--border-line)] shadow-xl py-1 z-10"
+            role="menu"
+          >
+            <button
+              type="button"
+              onclick={stopPage}
+              class="w-full text-left px-3 py-1.5 text-[11px] text-[var(--text-primary)] hover:bg-[var(--accent-cyan)]/10 hover:text-[var(--accent-cyan)] flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!targetImg}
+              role="menuitem"
+            >
+              <Square size={12} />
+              <span>Stop this page</span>
+            </button>
+            <button
+              type="button"
+              onclick={restartPage}
+              class="w-full text-left px-3 py-1.5 text-[11px] text-[var(--text-primary)] hover:bg-[var(--accent-cyan)]/10 hover:text-[var(--accent-cyan)] flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!targetImg}
+              role="menuitem"
+            >
+              <RotateCcw size={12} />
+              <span>Restart this page</span>
+            </button>
+            <div class="my-1 border-t border-[var(--border-line)]/50"></div>
+            <button
+              type="button"
+              onclick={stopAll}
+              class="w-full text-left px-3 py-1.5 text-[11px] text-[var(--text-primary)] hover:bg-[var(--accent-amber)]/10 hover:text-[var(--accent-amber)] flex items-center gap-2 cursor-pointer"
+              role="menuitem"
+            >
+              <OctagonX size={12} />
+              <span>Stop all pages</span>
+            </button>
+            <button
+              type="button"
+              onclick={restartAll}
+              class="w-full text-left px-3 py-1.5 text-[11px] text-[var(--text-primary)] hover:bg-[var(--accent-amber)]/10 hover:text-[var(--accent-amber)] flex items-center gap-2 cursor-pointer"
+              role="menuitem"
+            >
+              <ListRestart size={12} />
+              <span>Restart all pages</span>
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 {/if}

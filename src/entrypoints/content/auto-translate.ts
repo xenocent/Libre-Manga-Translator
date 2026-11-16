@@ -327,6 +327,73 @@ export class AutoTranslateQueue {
   get activeCount() {
     return this.inFlight.size;
   }
+
+  /**
+   * Drops all pending entries and force-releases every in-flight slot, marking
+   * each affected page idle in the registry. Used by the pill's "Stop all" —
+   * after this nothing is running and every page can be restarted cleanly.
+   */
+  cancelAll(): void {
+    for (const entry of this.queue) {
+      this.seenKeys.delete(entry.key);
+    }
+    this.queue = [];
+    // Release in-flight slots and mark those pages idle so the registry stops
+    // reporting them as pending. `getTargetSource` may return null for a page
+    // whose element detached mid-run; skip those (the 15-minute slot watchdog
+    // is their backstop).
+    for (const k of Array.from(this.inFlight)) {
+      const target = this.inFlightTargets.get(k);
+      if (target) {
+        const src = getTargetSource(target, true);
+        if (src) Registry.markIdle(src);
+      }
+      this.inFlight.delete(k);
+      this.releaseTarget(k);
+    }
+    for (const timer of this.slotTimers.values()) clearTimeout(timer);
+    this.slotTimers.clear();
+    this.activeTargets = new WeakSet();
+    this.publish();
+  }
+
+  cancelQueued(img: MangaTargetElement): boolean {
+    const i = this.queue.findIndex((e) => e.img === img);
+    if (i < 0) return false;
+    const [entry] = this.queue.splice(i, 1);
+    this.seenKeys.delete(entry.key);
+    this.publish();
+    return true;
+  }
+
+  cancelActive(img: MangaTargetElement): boolean {
+    const src = getTargetSource(img, true);
+    if (!src) return false;
+    const k = Registry.srcKeyOf(src);
+    if (!this.inFlight.has(k)) return false;
+    this.inFlight.delete(k);
+    this.releaseTarget(k);
+    this.seenKeys.delete(k);
+    Registry.markIdle(src);
+    if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
+    this.publish();
+    return true;
+  }
+
+  restart(img: MangaTargetElement) {
+    const src = getTargetSource(img, true);
+    if (!src) return;
+    const k = Registry.srcKeyOf(src);
+    if (this.inFlight.has(k)) {
+      this.inFlight.delete(k);
+      this.releaseTarget(k);
+    }
+    const qi = this.queue.findIndex((e) => e.img === img);
+    if (qi >= 0) this.queue.splice(qi, 1);
+    this.seenKeys.delete(k);
+    Registry.markIdle(src);
+    if (this.lastTranslateFn) this.enqueue(img, this.lastTranslateFn);
+  }
 }
 
 export class AutoTranslateOrchestrator {
@@ -460,6 +527,42 @@ export class AutoTranslateOrchestrator {
     }
   }
 
+  /** Per-page controls exposed to the pill hover menu. */
+  cancelQueued(img: MangaTargetElement): boolean {
+    return this.queue.cancelQueued(img);
+  }
+
+  cancelActive(img: MangaTargetElement): boolean {
+    return this.queue.cancelActive(img);
+  }
+
+  restart(img: MangaTargetElement) {
+    this.queue.restart(img);
+  }
+
+  /**
+   * Stop the whole queue and mark every in-flight page idle. Does NOT disable
+   * auto-translate — only drains the current run so a wedged chapter releases
+   * its slots and the user can restart cleanly.
+   */
+  stopAll() {
+    this.queue.cancelAll();
+  }
+
+  /**
+   * Re-enqueue every detected page that isn't already done. Used after Stop All,
+   * or when the user wants to re-run a chapter from the pill menu. The rescan
+   * re-detects pages and re-enqueues them through the normal path.
+   */
+  restartAll() {
+    this.queue.cancelAll();
+    // Fresh WeakSet so a restart rescan re-observes pages the observer already
+    // unobserved. The rescan re-detects and re-enqueues through the normal path.
+    this.observedImages = new WeakSet();
+    this.observedSourceKeys = new WeakMap();
+    this.scanAndObserve(true);
+  }
+
   /** Unified cap: slider 1..10 when auto ON, absolute 3 when OFF. */
   private async applyCap() {
     const [enabled, slider] = await Promise.all([
@@ -493,6 +596,12 @@ export class AutoTranslateOrchestrator {
             (entry.target instanceof HTMLImageElement || entry.target instanceof HTMLCanvasElement)
           ) {
             const img = entry.target;
+            // Enqueue every page the observer reports, not just near-viewport
+            // ones. A previous `isNearViewport` gate here DROPPED distant pages
+            // on fast scroll (counter showed 0/0/21/25 — nothing running, most
+            // pages abandoned, never enqueued). Enqueuing all is safe now: the
+            // queue is serial (concurrency 1) and every stage has a timeout, so
+            // a 25-page chapter paces itself instead of flooding Gemini.
             this.observer?.unobserve(img);
             if (this.translateFn) {
               this.queue.enqueue(img, this.translateFn);
@@ -679,12 +788,14 @@ export class AutoTranslateOrchestrator {
         this.observeImage(img);
       };
       img.addEventListener("load", onLoad, { once: true });
-    } else if (img instanceof HTMLCanvasElement && this.isNearViewport(img)) {
-      // Canvas dimensions can lag the scroll: a fast-scroll into a chapter
-      // observes a canvas whose width/height are still 0 (the reader hasn't
-      // painted that page yet). Without a recheck the canvas is skipped and
-      // never enqueued — the "fast scroll misses pages" race. Poll briefly
-      // for readiness; the observer picks it up once dimensions land.
+    } else if (img instanceof HTMLCanvasElement) {
+      // Canvas dimensions can lag the scroll: a fast-scroll observes a canvas
+      // whose width/height are still 0 (the reader hasn't painted that page
+      // yet). Without a recheck the canvas is skipped and never enqueued — the
+      // "fast scroll misses pages" race. Poll briefly for readiness; the
+      // IntersectionObserver picks it up once dimensions land. No viewport gate
+      // here: an off-screen canvas still has to be observed so it enqueues when
+      // ready (a previous gate dropped it forever).
       this.observedSourceKeys.set(img, k);
       this.waitForCanvasReady(img, k);
     }
