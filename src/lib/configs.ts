@@ -110,27 +110,23 @@ export const DefaultConfig = {
   // instead of merely abandoned; the background service worker only mounts a
   // last-resort guard `timeoutGuardGraceMs` later. Resolution lives in
   // `timeouts.ts` so the numbers stay unit-testable.
-  timeoutShortJobMs: 90_000,
-  /**
-   * Detection budget. A single forward pass should answer in a few seconds;
-   * capping it hard is what turns "stuck on Detecting text" into a visible
-   * error the user can retry, instead of a spinner that outlives its use.
-   */
+  // Per-stage budgets. Defaults are 30s (60s for quality inpaint) — a page that
+  // needs longer surfaces as a visible, retryable error rather than a spinner.
+  // Each is overridable in Options (sync:timeout-*) because real workloads vary:
+  // KNOWN TRADEOFFS at these defaults — (a) a Gemini call in the rawkuma log
+  // legitimately took 72s and would now time out; raise sync:timeout-translate
+  // if that recurs. (b) Quality inpaint runs ~30s per 512px tile and a full page
+  // needs several tiles, so 60s covers only 1-2 tiles; raise
+  // sync:timeout-inpaint-quality for dense pages.
+  timeoutShortJobMs: 30_000,
   timeoutDetectMs: 30_000,
-  timeoutLocalTranslateMs: 480_000,
-  timeoutApiTranslateMs: 180_000,
-  /**
-   * Budget added per text region for API translation. A dense page spends one
-   * inference round-trip on the answer plus one on the correction, so a flat
-   * page budget cut off pages that were still generating.
-   */
+  timeoutLocalTranslateMs: 60_000,
+  timeoutApiTranslateMs: 60_000,
   timeoutApiTranslatePerBoxMs: 15_000,
-  timeoutGeminiTranslateMs: 180_000,
-  timeoutInpaintMs: 180_000,
-  /** LaMa runs on wasm CPU (~30s+ per 512px tile) - budget per region. */
-  timeoutQualityInpaintMs: 300_000,
+  timeoutGeminiTranslateMs: 60_000,
+  timeoutInpaintMs: 30_000,
+  timeoutQualityInpaintMs: 60_000,
   timeoutQualityInpaintPerBoxMs: 60_000,
-  /** Extra time the background waits past the offscreen deadline. */
   timeoutGuardGraceMs: 5_000,
 
   detectionMinConfidence: 0.5,
