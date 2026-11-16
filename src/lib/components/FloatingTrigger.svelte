@@ -63,19 +63,16 @@
   }
 
   let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
-  // Per-page `progressText` can freeze on "Detecting text…" when its overlay is
-  // slow to mount, emits under a rekeyed src, or fails without ever firing a
-  // matching lmt:progress (handleProgress guards on targetImg + src match). So
-  // when the pinned page's label is STILL the untouched default but the chapter
-  // queue shows real movement, prefer the aggregate — it is always live. A
-  // single manual page that HAS progressed (or has no queue movement) keeps its
-  // per-page label, so "1+0 · 2/1" doesn't come back on lone pages.
-  const PROGRESS_PLACEHOLDER = "Detecting text…";
+  // A pinned page shows its OWN stage ("Translating…"), never the dense queue
+  // numbers — "2+0 · 2/25" over the page you're reading was noise. The aggregate
+  // only appears as a fallback when the queue is moving but nothing is pinned
+  // (auto-translate, scrolled away), so you still see chapter movement.
+  // Queue-idle + pinned falls back to the per-page label too (manual translate).
   let pillText = $derived(
-    progressText === PROGRESS_PLACEHOLDER && aggActive + aggQueued > 0
-      ? aggregateText()
-      : status === "translating" && targetImg
-        ? progressText
+    status === "translating" && targetImg
+      ? progressText
+      : aggActive + aggQueued > 0
+        ? aggregateText()
         : aggregateText(),
   );
   // The pill stays up while the chapter pipeline runs, even if the pinned page
