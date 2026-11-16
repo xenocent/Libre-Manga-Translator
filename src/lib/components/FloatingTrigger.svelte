@@ -63,13 +63,14 @@
   }
 
   let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
-  // When the chapter queue is running, always show the aggregate — even if the
-  // user is hovering a specific page. The per-page `progressText` freezes on
-  // "Detecting text…" during the claim→overlay-mount gap (no lmt:progress events
-  // yet), which made the pill look stuck. Only fall back to per-page text when
-  // the queue is idle (manual translate on a single page).
+  // Show the aggregate only when the chapter queue actually has MULTIPLE pages
+  // in motion, or when nothing is pinned (auto-translate, nothing hovered).
+  // A lone in-flight page (manual translate on one image) has no queue to
+  // summarise, so it keeps its own per-page stage — "1+0 · 2/1" on a single
+  // manual page was noise. Threshold is >1 precisely so a single manual page
+  // falls through to the per-page label.
   let pillText = $derived(
-    aggActive + aggQueued > 0
+    aggActive + aggQueued > 1 || (!targetImg && aggActive + aggQueued > 0)
       ? aggregateText()
       : status === "translating" && targetImg
         ? progressText
