@@ -4,6 +4,7 @@
   import { isPending as isRegistryPending, getStatus as getRegistryStatus } from "@/entrypoints/content/translation-registry";
   import { getElementSrc, type MangaTargetElement } from "@/lib/canvas";
   import type { PillPosition } from "@/lib/adapters";
+  import { hudEnabled as hudEnabledStore } from "@/entrypoints/content/hud-gate";
 
   let {
     onTranslate,
@@ -178,7 +179,12 @@
   // the one pinned page left the viewport, which hid the pill during auto-translate
   // — the queue kept working but the user saw nothing and read it as "stuck".
   // When nothing is pinned and the queue is idle, fall back to normal visibility.
-  let pillVisible = $derived(visible || (pillRunning && aggActive + aggQueued > 0));
+  // `hudEnabled` is the context gate: when the content script says this page
+  // should show nothing (auto-translate off + not a saved site + no manual
+  // override) the pill never renders, whatever the hover/pipeline state says.
+  let pillVisible = $derived(
+    $hudEnabledStore && (visible || (pillRunning && aggActive + aggQueued > 0)),
+  );
   // When the pill is up with no pinned page (aggregate-only mode), anchor it to
   // a fixed viewport corner so it doesn't render at stale/zero coordinates from
   // a detached image. updatePosition() only runs for pinned targets; this covers

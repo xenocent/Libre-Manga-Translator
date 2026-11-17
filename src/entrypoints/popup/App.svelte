@@ -303,6 +303,29 @@
     if (modeId === "gemini") sourceLang = "Auto-Detect";
   }
 
+  /** Feedback for the per-tab HUD toggle so the user knows it landed. */
+  let hudFlash = $state<string | null>(null);
+  let hudFlashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Turn the on-page translation bar (pill + readout) on for the CURRENT tab
+   * only, via a message to the content script. Not saved — a temporary
+   * "translate this page now" for sites that aren't saved manga sites.
+   */
+  async function showHudHere() {
+    try {
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) throw new Error("no active tab");
+      await browser.tabs.sendMessage(tab.id, { type: "LMT_SET_MANUAL_HUD", value: true });
+      hudFlash = "Translation bar shown on this page";
+    } catch (err) {
+      hudFlash = "Couldn't reach this page — try reloading it";
+      console.warn("LMT: manual HUD toggle failed:", err);
+    }
+    clearTimeout(hudFlashTimer);
+    hudFlashTimer = setTimeout(() => (hudFlash = null), 2600);
+  }
+
   function swapLanguages() {
     if (sourceLang === "Auto-Detect") {
       sourceLang = targetLang;
@@ -696,6 +719,20 @@
             {showContextDrawer ? "Hide glossary" : "Glossary ▾"}
           </button>
         </div>
+
+        <!-- Manual HUD trigger: show the translation bar on THIS page when it
+             isn't a saved manga site. Temporary per-tab, not saved. -->
+        <button
+          type="button"
+          onclick={showHudHere}
+          class="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md border border-[var(--border-line)] text-xs font-medium text-[var(--text-primary)] hover:border-[var(--accent-cyan)]/60 hover:text-[var(--accent-cyan)] transition-colors cursor-pointer"
+        >
+          <Zap size={12} />
+          Show translation bar on this page
+        </button>
+        {#if hudFlash}
+          <span class="text-[10px] text-[var(--accent-emerald)] -mt-0.5">{hudFlash}</span>
+        {/if}
 
         {#if showContextDrawer}
           <div class="pt-1.5 border-t border-[var(--border-faint)] flex flex-col gap-1.5">

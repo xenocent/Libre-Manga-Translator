@@ -36,6 +36,7 @@ import { onDestroy } from "svelte";
     resetSeriesContext,
     saveSeriesContextSettings,
   } from "@/lib/series-context-store";
+  import { hudEnabled as hudEnabledStore } from "@/entrypoints/content/hud-gate";
 
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
@@ -456,87 +457,91 @@ import { onDestroy } from "svelte";
     e.preventDefault();
   }}
 >
-  <div
-    class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl transition-all"
-    onmouseenter={() => (readoutHover = true)}
-    onmouseleave={() => (readoutHover = false)}
-    aria-label={`Page progress: ${queue.completed} of ${queue.detected} translated, ${queue.active} translating, ${queue.queued} queued`}
-  >
+  {#if $hudEnabledStore}
+    <div
+      class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl transition-all"
+      onmouseenter={() => (readoutHover = true)}
+      onmouseleave={() => (readoutHover = false)}
+      aria-label={`Page progress: ${queue.completed} of ${queue.detected} translated, ${queue.active} translating, ${queue.queued} queued`}
+    >
     {#if readoutHover}
-      <!-- Expanded: labeled legend so no number is bare -->
-      <div class="flex flex-col gap-0.5 whitespace-nowrap">
-        <span class="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-0.5">Page progress</span>
-        <span class="flex items-center justify-between gap-3">
-          <span class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-[var(--accent-cyan)]"></span>
-            <span>Translating</span>
+        <!-- Expanded: labeled legend so no number is bare -->
+        <div class="flex flex-col gap-0.5 whitespace-nowrap">
+          <span class="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-0.5">Page progress</span>
+          <span class="flex items-center justify-between gap-3">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-[var(--accent-cyan)]"></span>
+              <span>Translating</span>
+            </span>
+            <span class="text-[var(--text-primary)] font-mono">{queue.active}</span>
           </span>
-          <span class="text-[var(--text-primary)] font-mono">{queue.active}</span>
-        </span>
-        <span class="flex items-center justify-between gap-3">
-          <span class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-[var(--accent-amber)]"></span>
-            <span>Queued</span>
+          <span class="flex items-center justify-between gap-3">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-[var(--accent-amber)]"></span>
+              <span>Queued</span>
+            </span>
+            <span class="text-[var(--text-primary)] font-mono">{queue.queued}</span>
           </span>
-          <span class="text-[var(--text-primary)] font-mono">{queue.queued}</span>
-        </span>
-        <span class="flex items-center justify-between gap-3">
-          <span class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-[var(--accent-emerald)]"></span>
-            <span>Done</span>
+          <span class="flex items-center justify-between gap-3">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-[var(--accent-emerald)]"></span>
+              <span>Done</span>
+            </span>
+            <span class="text-[var(--text-primary)] font-mono">{queue.completed}</span>
           </span>
-          <span class="text-[var(--text-primary)] font-mono">{queue.completed}</span>
-        </span>
-        <span class="flex items-center justify-between gap-3">
-          <span class="flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-[var(--text-dim)]"></span>
-            <span>Detected</span>
+          <span class="flex items-center justify-between gap-3">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-[var(--text-dim)]"></span>
+              <span>Detected</span>
+            </span>
+            <span class="text-[var(--text-primary)] font-mono">{queue.detected}</span>
           </span>
-          <span class="text-[var(--text-primary)] font-mono">{queue.detected}</span>
-        </span>
-      </div>
-    {:else}
-      <!-- Collapsed: sentence-fragment summary + progress bar -->
-      <div class="flex flex-col gap-1 min-w-[92px]">
-        <span
-          class="whitespace-nowrap {qAllDone
-            ? 'text-[var(--accent-emerald)]'
-            : qRunning > 0
-              ? 'text-[var(--text-primary)]'
-              : 'text-[var(--text-muted)]'}"
-        >
-          {readoutSummary}
-        </span>
-        {#if queue.detected > 0}
-          <div class="w-full h-[3px] rounded bg-[var(--border-line)] overflow-hidden">
-            <div
-              class="h-full rounded transition-all duration-300 {qAllDone
-                ? 'bg-[var(--accent-emerald)]'
-                : 'bg-[var(--accent-cyan)]'}"
-              style="width: {qPct}%"
-            ></div>
-          </div>
-        {/if}
-      </div>
-    {/if}
-  </div>
-  <button
-    type="button"
-    onclick={(e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      isOpen = !isOpen;
-    }}
-    class="w-11 h-11 bg-[var(--surface-panel)] text-[var(--text-primary)] rounded-lg shadow-xl flex items-center justify-center cursor-pointer hover:border-[var(--accent-cyan)] hover:text-[var(--accent-cyan)] hover:shadow-[0_0_12px_var(--accent-cyan-glow)] transition-all border border-[var(--border-line)]"
-    title="LMT settings"
-    aria-label="Toggle settings panel"
-  >
-    {#if isOpen}
-      <X size={18} />
-    {:else}
-      <Settings size={18} />
-    {/if}
-  </button>
+        </div>
+      {:else}
+        <!-- Collapsed: sentence-fragment summary + progress bar -->
+        <div class="flex flex-col gap-1 min-w-[92px]">
+          <span
+            class="whitespace-nowrap {qAllDone
+              ? 'text-[var(--accent-emerald)]'
+              : qRunning > 0
+                ? 'text-[var(--text-primary)]'
+                : 'text-[var(--text-muted)]'}"
+          >
+            {readoutSummary}
+          </span>
+          {#if queue.detected > 0}
+            <div class="w-full h-[3px] rounded bg-[var(--border-line)] overflow-hidden">
+              <div
+                class="h-full rounded transition-all duration-300 {qAllDone
+                  ? 'bg-[var(--accent-emerald)]'
+                  : 'bg-[var(--accent-cyan)]'}"
+                style="width: {qPct}%"
+              ></div>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
+  {#if $hudEnabledStore}
+    <button
+      type="button"
+      onclick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        isOpen = !isOpen;
+      }}
+      class="w-11 h-11 bg-[var(--surface-panel)] text-[var(--text-primary)] rounded-lg shadow-xl flex items-center justify-center cursor-pointer hover:border-[var(--accent-cyan)] hover:text-[var(--accent-cyan)] hover:shadow-[0_0_12px_var(--accent-cyan-glow)] transition-all border border-[var(--border-line)]"
+      title="LMT settings"
+      aria-label="Toggle settings panel"
+    >
+      {#if isOpen}
+        <X size={18} />
+      {:else}
+        <Settings size={18} />
+      {/if}
+    </button>
+  {/if}
 </div>
 
 <!-- SLIDING PANEL (360px Void-0 Contract) -->

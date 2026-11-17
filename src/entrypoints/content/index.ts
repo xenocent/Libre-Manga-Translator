@@ -2,6 +2,7 @@ import Overlay from "@/lib/components/Overlay.svelte";
 import Sidebar from "@/lib/components/Sidebar.svelte";
 import FloatingTrigger from "@/lib/components/FloatingTrigger.svelte";
 import { AutoTranslateOrchestrator } from "./auto-translate";
+import { initHudGate, setManualHud } from "./hud-gate";
 import * as Registry from "./translation-registry";
 import { mount, unmount } from "svelte";
 import { ShadowRootContentScriptUi, storage } from "#imports";
@@ -196,6 +197,17 @@ export default defineContentScript({
     // Start the diagnostic timeline before anything else can transition, so a
     // page that hangs on its first dispatch is still explained by the log.
     void installTimelineLogger();
+
+    // HUD visibility gate: the pill + progress readout only render where
+    // translation is wanted (saved manga site, or a manual per-tab override
+    // from the popup). On every other tab — YouTube, WhatsApp, Google — the
+    // content script still loads but the HUD stays hidden. The settings
+    // sidebar (gear) is separate and shows everywhere as the manual entry
+    // point. `setManualHud` is called from the onMessage listener near the
+    // bottom of main().
+    ctx.onInvalidated(
+      initHudGate(window.location.hostname),
+    );
 
     const translatedSrcMap = new Map<string, string>();
     const inpaintedSrcCache = new Map<
@@ -1234,6 +1246,13 @@ export default defineContentScript({
         );
 
         return true;
+      }
+      // Per-tab manual HUD toggle from the popup toolbar: show the pill +
+      // readout on this page even though it isn't a saved manga site. Not
+      // persisted — a temporary "translate this page now".
+      if (msg.type === "LMT_SET_MANUAL_HUD") {
+        setManualHud(Boolean(msg.value), window.location.hostname);
+        sendResponse({ ok: true });
       }
     });
   },
