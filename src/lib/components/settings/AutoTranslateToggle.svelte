@@ -155,55 +155,6 @@
               Not in the list — auto-translate stays off here until you add it.
             </p>
           {/if}
-
-          <!-- Domain list management -->
-          <div class="mt-2 pt-2 border-t border-[var(--border-faint)]">
-            <button
-              type="button"
-              onclick={() => (showDomainList = !showDomainList)}
-              class="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-            >
-              {showDomainList ? "Hide" : "Manage"} saved sites ({Object.keys(domainList).length})
-            </button>
-            {#if showDomainList}
-              <div class="mt-1.5 space-y-1">
-                {#each Object.entries(domainList) as [domain] (domain)}
-                  <div class="flex items-center justify-between gap-1.5 bg-[var(--bg-void)] px-1.5 py-1 rounded border border-[var(--border-faint)]">
-                    <span class="font-mono text-[10px] text-[var(--text-primary)] truncate">{domain}</span>
-                    <button
-                      type="button"
-                      onclick={() => removeDomain(domain)}
-                      class="shrink-0 p-0.5 rounded text-[var(--text-dim)] hover:text-[var(--accent-rose)] transition-colors cursor-pointer"
-                      aria-label="Remove {domain}"
-                    >
-                      <X size={11} />
-                    </button>
-                  </div>
-                {:else}
-                  <p class="text-[10px] text-[var(--text-dim)] italic">No sites saved yet.</p>
-                {/each}
-              </div>
-
-              <!-- Add domain manually -->
-              <div class="mt-1.5 flex gap-1">
-                <input
-                  type="text"
-                  bind:value={newDomain}
-                  onkeydown={(e) => e.key === "Enter" && addDomain(newDomain)}
-                  placeholder="example.com"
-                  class="flex-1 bg-[var(--bg-void)] border border-[var(--border-faint)] rounded px-1.5 py-1 text-[10px] font-mono outline-none focus:border-[var(--accent-emerald)]/40"
-                />
-                <button
-                  type="button"
-                  onclick={() => addDomain(newDomain)}
-                  disabled={!newDomain.trim()}
-                  class="shrink-0 px-2 py-1 rounded bg-[var(--surface-panel)] border border-[var(--accent-emerald)]/40 text-[var(--accent-emerald)] text-[10px] font-medium hover:bg-[var(--accent-emerald)]/10 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Plus size={11} />
-                </button>
-              </div>
-            {/if}
-          </div>
         {/if}
       </div>
 
@@ -231,5 +182,58 @@
         </div>
       </div>
     {/if}
+  {/if}
+
+  <!-- Saved sites (whitelist) — shown regardless of autoTranslate so you can
+       review/edit the list when auto is off. A whitelisted site shows the HUD
+       bar even with auto-translate off, so managing the list must not depend
+       on the toggle. -->
+  {#if scopeLoaded}
+    <div class="mt-2 pt-2 border-t border-[var(--border-faint)]">
+      <button
+        type="button"
+        onclick={() => (showDomainList = !showDomainList)}
+        class="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+      >
+        {showDomainList ? "Hide" : "Manage"} saved sites ({Object.keys(domainList).length})
+      </button>
+      {#if showDomainList}
+        <div class="mt-1.5 space-y-1">
+          {#each Object.entries(domainList) as [domain] (domain)}
+            <div class="flex items-center justify-between gap-1.5 bg-[var(--bg-void)] px-1.5 py-1 rounded border border-[var(--border-faint)]">
+              <span class="font-mono text-[10px] text-[var(--text-primary)] truncate">{domain}</span>
+              <button
+                type="button"
+                onclick={() => removeDomain(domain)}
+                class="shrink-0 p-0.5 rounded text-[var(--text-dim)] hover:text-[var(--accent-rose)] transition-colors cursor-pointer"
+                aria-label="Remove {domain}"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          {:else}
+            <p class="text-[10px] text-[var(--text-dim)] italic">No sites saved yet.</p>
+          {/each}
+        </div>
+
+        <div class="mt-1.5 flex gap-1">
+          <input
+            type="text"
+            bind:value={newDomain}
+            onkeydown={(e) => e.key === "Enter" && addDomain(newDomain)}
+            placeholder="example.com"
+            class="flex-1 bg-[var(--bg-void)] border border-[var(--border-faint)] rounded px-1.5 py-1 text-[10px] font-mono outline-none focus:border-[var(--accent-emerald)]/40"
+          />
+          <button
+            type="button"
+            onclick={() => addDomain(newDomain)}
+            disabled={!newDomain.trim()}
+            class="shrink-0 px-2 py-1 rounded bg-[var(--surface-panel)] border border-[var(--accent-emerald)]/40 text-[var(--accent-emerald)] text-[10px] font-medium hover:bg-[var(--accent-emerald)]/10 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Plus size={11} />
+          </button>
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>

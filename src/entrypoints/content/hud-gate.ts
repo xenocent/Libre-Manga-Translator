@@ -57,9 +57,11 @@ function recompute(host: string): void {
   if (manualHud) {
     hudEnabled.set(true);
     reason = "manual toggle";
-  } else if (scopeState.scope === "domain" && scopeState.domains[host] === true) {
-    // A saved manga site: explicitly whitelisted under domain scope. Shows the
-    // pill even with auto-translate off so it's on the homepage.
+  } else if (scopeState.domains[host] === true) {
+    // A saved manga site: explicitly in the whitelist. Shows the pill even
+    // with auto-translate off so it's on the homepage. Checked regardless of
+    // scope — a host the user explicitly saved counts as "saved" whether the
+    // current scope is domain or global.
     hudEnabled.set(true);
     reason = "saved/whitelisted site";
   } else if (autoEnabled && hostAllowed(host)) {
