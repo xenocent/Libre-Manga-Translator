@@ -79,9 +79,12 @@ function recompute(host: string): void {
     hudEnabled.set(false);
     reason = `hidden (auto=${autoEnabled ? "on" : "off"}, scope=${scopeState.scope}${scopeState.scope === "domain" ? ", listed=" + (scopeState.domains[host] === true) : ""})`;
   }
-  // Decision is logged so a "gear still shows" / "bar missing" report can be
-  // confirmed straight from the console without guessing which branch fired.
-  console.debug(`[LMT] HUD ${reason}`);
+  // Decision logged at `log` level (not `debug`, which Chrome hides behind the
+  // Verbose filter) so a "bar missing" report can be confirmed straight from
+  // the default console.
+  console.log(
+    `[LMT] HUD ${hudEnabled.get() ? "SHOW" : "HIDE"} — ${reason}`,
+  );
 }
 
 /** Begin observing the settings that feed the gate, for this host. */
