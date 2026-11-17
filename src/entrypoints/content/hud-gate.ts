@@ -37,8 +37,20 @@ const AUTO_DOMAINS_KEY = "sync:auto-translate-domains";
 export const hudEnabled = writable<boolean>(false);
 
 let autoEnabled = false;
-let scopeState: AutoScopeState | null = null;
+let scopeState: AutoScopeState = { scope: "global", domains: {} };
 let manualHud = false;
+
+/**
+ * Does this host qualify under the auto-translate scope?
+ *
+ * `allowsHost` alone is wrong here: with global scope it returns true for every
+ * host, which would reopen the HUD everywhere even with auto-translate off. So
+ * the auto branch is gated on `autoEnabled` explicitly.
+ */
+function hostAllowed(host: string): boolean {
+  if (scopeState.scope === "global") return true;
+  return scopeState.domains[host] === true;
+}
 
 function recompute(host: string): void {
   if (manualHud) {
@@ -47,21 +59,13 @@ function recompute(host: string): void {
   }
   // A saved manga site: explicitly whitelisted under domain scope. Shows the
   // pill even with auto-translate off so it's on the homepage.
-  if (
-    scopeState?.scope === "domain" &&
-    scopeState.domains[host] === true
-  ) {
+  if (scopeState.scope === "domain" && scopeState.domains[host] === true) {
     hudEnabled.set(true);
     return;
   }
-  // Auto-translate actively running and targeting this host (global scope, or
-  // domain scope with this host listed). Requires autoEnabled so a global
-  // scope with auto-translate OFF still stays hidden.
-  if (autoEnabled && scopeState && scopeState.domains[host] === true) {
-    hudEnabled.set(true);
-    return;
-  }
-  if (autoEnabled && scopeState?.scope === "global") {
+  // Auto-translate actively running and targeting this host. The `autoEnabled`
+  // factor is what keeps the HUD off on random tabs when auto-translate is off.
+  if (autoEnabled && hostAllowed(host)) {
     hudEnabled.set(true);
     return;
   }
