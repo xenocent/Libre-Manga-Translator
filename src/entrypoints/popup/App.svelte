@@ -46,7 +46,7 @@
 
   // Build stamp (e.g. "1.0.5 (3e9058f)") so the loaded build is always
   // identifiable — a stale reload otherwise looks identical to the new one.
-  let extVersion = "";
+  let extVersion = $state("");
 
   // Pipeline & Models State
   let currentMode = $state(DefaultConfig.currentMode);
