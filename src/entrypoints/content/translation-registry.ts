@@ -153,12 +153,28 @@ export interface QueueProgress {
 
 let queueCounts = { active: 0, queued: 0 };
 let detectedCount = 0;
+/**
+ * Srcs that reached `done` via a LIVE pipeline this session (the user actually
+ * watched them translate). Kept separate from cache-restored pages so the
+ * readout's `completed` reflects real work done now, not pages that merely
+ * loaded their saved translation on open. Without this a chapter that restores
+ * 15 cached pages and translates 2 live reports `17/17`, hiding the 2 real ones.
+ */
+const liveDoneSrcs = new Set<string>();
 
-/** Pages settled this document, including ones restored straight from cache. */
+/** Pages translated by a live pipeline this session (excludes cache-restored). */
 export function doneCount(): number {
-  let done = 0;
-  for (const status of bySrc.values()) if (status === "done") done++;
-  return done;
+  return liveDoneSrcs.size;
+}
+
+/**
+ * Marks a src as translated by the live pipeline this session. Called only from
+ * the pipeline success path — NOT the cache-restore path — so `doneCount()`
+ * stays an honest "how many did we translate now".
+ */
+export function markLiveDone(src: string): void {
+  liveDoneSrcs.add(srcKeyOf(src));
+  publishProgress();
 }
 
 /**

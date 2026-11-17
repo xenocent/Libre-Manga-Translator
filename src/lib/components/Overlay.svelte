@@ -568,6 +568,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
     mode = "results";
     Registry.markDone(originalSrc);
+    // Count this as a LIVE translation for the readout — this is the pipeline
+    // success path, not the cache-restore path (line ~932). Without this the
+    // readout's `completed` excludes pages the user just watched translate.
+    Registry.markLiveDone(originalSrc);
   }
 
   async function handleConfirm() {

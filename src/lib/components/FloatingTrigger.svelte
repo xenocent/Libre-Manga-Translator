@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { Sparkles, LoaderCircle, GripVertical, Settings, Square, RotateCcw, OctagonX, ListRestart } from "lucide-svelte";
-  import { isPending as isRegistryPending } from "@/entrypoints/content/translation-registry";
+  import { isPending as isRegistryPending, getStatus as getRegistryStatus } from "@/entrypoints/content/translation-registry";
   import { getElementSrc, type MangaTargetElement } from "@/lib/canvas";
   import type { PillPosition } from "@/lib/adapters";
 
@@ -110,18 +110,69 @@
   }
 
   let pillRunning = $derived(status === "translating" || aggActive + aggQueued > 0);
-  // A pinned page shows its OWN stage ("Translating…"), never the dense queue
-  // numbers — "2+0 · 2/25" over the page you're reading was noise. The aggregate
-  // only appears as a fallback when the queue is moving but nothing is pinned
-  // (auto-translate, scrolled away), so you still see chapter movement.
-  // Queue-idle + pinned falls back to the per-page label too (manual translate).
-  let pillText = $derived(
-    status === "translating" && targetImg
-      ? progressText
-      : aggActive + aggQueued > 0
-        ? aggregateText()
-        : aggregateText(),
-  );
+  // A pinned page (hovered or clicked) ALWAYS shows its own stage, never the
+  // dense queue numbers. Previous version only showed per-page when `status ===
+  // "translating"`, but `adoptMode`/`settleTarget` flips status back to "idle"
+  // during the mount gap, leaking `2+4 · 4/17` onto a page you're reading.
+  let pillText = $derived(targetImg ? progressText : aggregateText());
+
+  // Pipeline step tracking. Derive the step index from `progressText` (the
+  // overlay emits these exact strings) and record when each step was entered so
+  // the step bar can show elapsed time per step.
+  // Step order: detect (incl. model download) → translate → render.
+  const STEP_LABELS = ["Detect", "Translate", "Render"] as const;
+  type PipelineStep = 0 | 1 | 2; // detect, translate, render
+
+  function stepFromProgress(msg: string): PipelineStep {
+    if (/detect|download/i.test(msg)) return 0;
+    if (/translat/i.test(msg)) return 1;
+    if (/render|inpaint/i.test(msg)) return 2;
+    return 0; // fallback: "Detecting text…" or unknown → detect
+  }
+
+  let currentStep = $state<PipelineStep>(0);
+  // Timestamps for when each step was entered (ms since page start).
+  let stepStartTimes = $state<number[]>([0, 0, 0]);
+  let pageStartMs = $state<number>(0);
+
+  function trackStep(msg: string) {
+    const step = stepFromProgress(msg);
+    const now = performance.now();
+    if (step !== currentStep) {
+      // Step changed — record entry time for the new step.
+      currentStep = step;
+      stepStartTimes = [...stepStartTimes];
+      stepStartTimes[step] = now;
+    }
+  }
+
+  // Called when a new page becomes the target (on click or hover during translate).
+  function resetStepTracking() {
+    currentStep = 0;
+    pageStartMs = performance.now();
+    stepStartTimes = [pageStartMs, 0, 0];
+  }
+
+  // Elapsed time for each step (ms). Completed steps use next step's start;
+  // current step uses now.
+  function stepElapsedMs(step: PipelineStep): number {
+    if (stepStartTimes[step] === 0) return 0; // step not yet reached
+    if (step < 2 && stepStartTimes[step + 1] > 0) {
+      // Next step already started — this step is done.
+      return stepStartTimes[step + 1] - stepStartTimes[step];
+    }
+    // Current or last step — use now.
+    return performance.now() - stepStartTimes[step];
+  }
+
+  function formatElapsed(ms: number): string {
+    if (ms < 1000) return "<1s";
+    if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+    return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+  }
+
+  let stepBarVisible = $derived(status === "translating" && targetImg !== null);
+  let stepBarHover = $state(false);
   // The pill stays up while the chapter pipeline runs, even if the pinned page
   // scrolls off-screen. Previously `handleScrollRaw` set visible=false the moment
   // the one pinned page left the viewport, which hid the pill during auto-translate
@@ -172,6 +223,10 @@
   } catch {}
 
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
+  // Tracks whether the cursor is currently over the pill itself. The hide timer
+  // fires on image mouseleave; without this flag a fast move toward the pill
+  // crosses the gap and hides it before the pill's own onmouseenter can cancel.
+  let cursorInPill = false;
   function cancelHide() {
     if (hideTimer) {
       clearTimeout(hideTimer);
@@ -192,6 +247,8 @@
     cancelHide();
     if (status === "translating") return;
     hideTimer = setTimeout(() => {
+      // Cursor already over the pill — the user is moving to click it, never hide.
+      if (cursorInPill) return;
       // Keep a translating pill pinned only while its image is attached and
       // actually on screen; scrolling it away must not leave the pill
       // stranded over the rest of the reader UI.
@@ -205,7 +262,7 @@
       }
       visible = false;
       targetImg = null;
-    }, 250);
+    }, 400);
   }
 
   function meetsThreshold(el: MangaTargetElement) {
@@ -272,20 +329,41 @@
   // "translating" while the registry still holds the image pending — the
   // overlay mounts ~1s after click, and re-querying that gap used to flash
   // the pill back to Translate (then hide on pointer-out).
+  //
+  // CRITICAL: when the registry says `done`, the page IS translated — do not
+  // read `data-lmt-progress` from the wrapper, because that attribute is set
+  // once at mount ("Detecting text…") and only updated by live progress events.
+  // A finished page keeps the stale attribute forever, freezing the pill on
+  // "Detecting text…" even though the pipeline ended minutes ago.
   function adoptMode(img: MangaTargetElement) {
     const q = queryMode(img);
     const src = getElementSrc(img, true);
     const pending = !!src && isRegistryPending(src);
     const sourceChanged = img === targetImg && src !== targetSource;
+
     if (sourceChanged) {
       targetSource = src;
       progressText = "Detecting text…";
       status = pending ? "translating" : "idle";
       if (!pending && autoImg === img) autoImg = null;
+      resetStepTracking();
     }
+
+    // Registry `done` wins over everything — show "Translated" and stop.
+    // Do NOT read the wrapper's `data-lmt-progress` here: that attribute is set
+    // once at mount ("Detecting text…") and only updated by live progress
+    // events, so a finished page keeps the stale string forever.
+    if (src && !pending && getRegistryStatus(src) === "done") {
+      status = "translated";
+      progressText = "Translated";
+      return q;
+    }
+
     if (q === "translating") {
       status = q;
-      progressText = getOverlayProgress?.(img) ?? "Translating…";
+      const wrapperProgress = getOverlayProgress?.(img) ?? "Translating…";
+      progressText = wrapperProgress;
+      trackStep(wrapperProgress);
     } else if (status !== "translating" || !pending) {
       status = q;
     }
@@ -344,6 +422,8 @@
       // mounts and starts emitting per-page updates.
       progressText = aggregateText();
       status = targetSource && isRegistryPending(targetSource) ? "translating" : "idle";
+      // New page → reset step tracking so the bar starts fresh.
+      resetStepTracking();
     }
     if (auto) autoImg = img;
     if (switched && !isDraggingTrigger) dragOffset = null;
@@ -668,7 +748,13 @@
         customEvent.detail.message &&
         srcMatches(targetImg, customEvent.detail.src)
       ) {
-        progressText = customEvent.detail.message;
+        const msg = customEvent.detail.message;
+        // A done page must never regress to a stale step label — ignore any
+        // trailing progress events once the registry marks it complete.
+        const src = getElementSrc(targetImg, true);
+        if (src && getRegistryStatus(src) === "done") return;
+        progressText = msg;
+        trackStep(msg);
       }
     }
 
@@ -800,8 +886,8 @@
     role="presentation"
     class="lmt-floating-root fixed z-[999999] pointer-events-auto select-none transition-opacity duration-200 {isDraggingTrigger ? 'cursor-grabbing' : ''}"
     style="top: {Math.max(8, y)}px; left: {Math.max(8, x)}px;"
-    onmouseenter={cancelHide}
-    onmouseleave={scheduleHide}
+    onmouseenter={() => { cursorInPill = true; cancelHide(); }}
+    onmouseleave={() => { cursorInPill = false; scheduleHide(); }}
     onmousedown={(e) => e.stopPropagation()}
     onpointerdown={(e) => e.stopPropagation()}
     onclick={(e) => {
@@ -898,6 +984,41 @@
         {/if}
       </div>
     </div>
+
+    {#if stepBarVisible}
+      <!-- 3-segment pipeline step bar (Detect → Translate → Render) -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="w-full h-[3px] mt-0.5 flex gap-[2px]"
+        onmouseenter={() => (stepBarHover = true)}
+        onmouseleave={() => (stepBarHover = false)}
+      >
+        {#each STEP_LABELS as label, i}
+          {@const elapsed = formatElapsed(stepElapsedMs(i as PipelineStep))}
+          {@const isDone = currentStep > i}
+          {@const isCurrent = currentStep === i}
+          <div
+            class="flex-1 rounded-full transition-colors duration-300 {isDone
+              ? 'bg-[var(--accent-cyan)]'
+              : isCurrent
+                ? 'bg-[var(--accent-cyan)]/60 animate-pulse'
+                : 'bg-[var(--border-line)]'}"
+            title="{label}: {isDone || isCurrent ? elapsed : 'pending'}"
+          ></div>
+        {/each}
+      </div>
+      {#if stepBarHover}
+        <div class="w-full mt-0.5 flex gap-[2px] text-[9px] text-[var(--text-dim)] leading-tight">
+          {#each STEP_LABELS as label, i}
+            {@const elapsed = formatElapsed(stepElapsedMs(i as PipelineStep))}
+            {@const reached = currentStep >= i}
+            <span class="flex-1 text-center {reached ? '' : 'opacity-40'}">
+              {label} {reached ? elapsed : '·'}
+            </span>
+          {/each}
+        </div>
+      {/if}
+    {/if}
   </div>
 {/if}
 

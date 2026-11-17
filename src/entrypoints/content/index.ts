@@ -209,6 +209,26 @@ export default defineContentScript({
     >();
     let lastDetectMs: number | undefined = undefined;
 
+    /**
+     * Tears down the overlay for a src via `ui.remove()`, which fires the
+     * mount's onRemove cleanup (restore wrapper, mark idle, clear caches). Used
+     * by the pill's "Stop this page" so a running pipeline actually stops
+     * rendering — cancelling the queue slot alone left the overlay on screen.
+     * Returns true if an overlay existed and was removed.
+     */
+    function closeOverlayForSrc(rawSrc: string): boolean {
+      const originalSrc = translatedSrcMap.get(srcKey(rawSrc)) ?? rawSrc;
+      const overlay = overlays.get(originalSrc);
+      if (!overlay) return false;
+      try {
+        overlay.ui.remove(); // triggers onRemove: deletes map entry, restores wrapper
+      } catch (err) {
+        console.warn("LMT: overlay stop cleanup failed:", err);
+        overlays.delete(originalSrc);
+      }
+      return true;
+    }
+
     // Mount independent sidebar shadow UI
     createShadowRootUi(ctx, {
       name: "lmt-sidebar",
@@ -1147,8 +1167,10 @@ export default defineContentScript({
               autoTranslator.enqueueManual(img);
             },
             onStopPage: (img: MangaTargetElement) => {
-              // Try to cancel a queued page first; if it was already running,
-              // cancel the active slot instead.
+              // Close the overlay first so a running pipeline stops rendering.
+              const raw = getTargetSource(img, true);
+              if (raw) closeOverlayForSrc(raw);
+              // Then release the queue/registry slot (queued vs active).
               if (!autoTranslator.cancelQueued(img)) {
                 autoTranslator.cancelActive(img);
               }
@@ -1158,6 +1180,10 @@ export default defineContentScript({
             },
             onStopAll: () => {
               autoTranslator.stopAll();
+              // Close every mounted overlay so nothing keeps rendering.
+              for (const originalSrc of Array.from(overlays.keys())) {
+                closeOverlayForSrc(originalSrc);
+              }
             },
             onRestartAll: () => {
               autoTranslator.restartAll();
