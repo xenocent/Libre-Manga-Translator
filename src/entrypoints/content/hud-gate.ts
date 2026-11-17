@@ -1,128 +1,29 @@
 /**
- * Reactive HUD visibility gate.
+ * HUD visibility gate — reverted to ALWAYS SHOW.
  *
- * The pill and the progress readout render on every tab the content script
- * loads into, which read as the extension invading sites with nothing to
- * translate (YouTube, WhatsApp, Google, Binance). This store holds the single
- * boolean both components subscribe to, so flipping it hides/shows the HUD
- * without unmounting.
+ * Attempts to conditionally hide the pill/readout by auto-translate state or
+ * whitelist caused more problems than they solved (bar/translation disagreeing
+ * per tab, sites that are manga sites by adapter but not by whitelist never
+ * showing, etc.). Reverted: the store is a constant `true`, so the HUD shows on
+ * every tab as before. Kept as a store so the components that already subscribe
+ * to `$hudEnabledStore` still work unchanged.
  *
- * The user's rule, verbatim: the HUD is completely gone when auto-translate is
- * OFF and the host is NOT whitelisted. It shows when the host is a saved manga
- * site (rawkuma, manga-one, user-saved) or when auto-translate is actively
- * running here. Plus a per-tab manual override from the popup.
- *
- * So the gate is: show iff
- *   • manual override, OR
- *   • the host is explicitly whitelisted (a saved site, shown even when
- *     auto-translate is off so the pill is on the homepage), OR
- *   • auto-translate is ON and targeting this host.
- *
- * Note we cannot just use `allowsHost`: with global scope it returns true for
- * every host, which would reopen the HUD everywhere the moment scope is
- * global — even with auto-translate off. Hence the explicit `autoEnabled`
- * factor for the auto-translate branch.
- *
- * The manual flag lives in this tab's content-script instance (no storage) —
- * a per-tab temporary "translate this page now", not a saved setting.
+ * The per-tab manual toggle from the popup is now a no-op (the bar always
+ * shows anyway) but the popup button and its message handler are left intact
+ * so the control still exists.
  */
 
 import { writable } from "svelte/store";
-import { AUTO_SCOPE_KEY, type AutoScopeState } from "./auto-translate-scope";
-import { storage } from "#imports";
 
-const AUTO_ENABLED_KEY = "sync:auto-translate";
-const AUTO_DOMAINS_KEY = "sync:auto-translate-domains";
+export const hudEnabled = writable<boolean>(true);
 
-export const hudEnabled = writable<boolean>(false);
-
-let autoEnabled = false;
-// Default scope must MATCH the orchestrator (`auto-translate.ts`), which
-// defaults to "domain"/empty whitelist — a fresh install must not show the bar
-// on every tab, same reason it must not translate on every tab. Showing the
-// HUD implies translation is active there, so the gate and the orchestrator
-// must read the same default or they disagree and you get "bar everywhere" /
-// "bar nowhere" instability.
-let scopeState: AutoScopeState = { scope: "domain", domains: {} };
-let manualHud = false;
-
-/**
- * Does this host qualify under the auto-translate scope?
- *
- * `allowsHost` alone is wrong here: with global scope it returns true for every
- * host, which would reopen the HUD everywhere even with auto-translate off. So
- * the auto branch is gated on `autoEnabled` explicitly.
- */
-function hostAllowed(host: string): boolean {
-  if (scopeState.scope === "global") return true;
-  return scopeState.domains[host] === true;
+/** No-op: kept for API compatibility with the popup message handler. */
+export function initHudGate(): () => void {
+  hudEnabled.set(true);
+  return () => {};
 }
 
-function recompute(host: string): void {
-  let reason: string;
-  if (manualHud) {
-    hudEnabled.set(true);
-    reason = "manual toggle";
-  } else if (scopeState.domains[host] === true) {
-    // A saved manga site: explicitly in the whitelist. Shows the pill even
-    // with auto-translate off so it's on the homepage. Checked regardless of
-    // scope — a host the user explicitly saved counts as "saved" whether the
-    // current scope is domain or global.
-    hudEnabled.set(true);
-    reason = "saved/whitelisted site";
-  } else if (autoEnabled && hostAllowed(host)) {
-    // Auto-translate actively running and targeting this host. The `autoEnabled`
-    // factor is what keeps the HUD off on random tabs when auto-translate is off.
-    hudEnabled.set(true);
-    reason = "auto-translate on";
-  } else {
-    hudEnabled.set(false);
-    reason = `hidden (auto=${autoEnabled ? "on" : "off"}, scope=${scopeState.scope}${scopeState.scope === "domain" ? ", listed=" + (scopeState.domains[host] === true) : ""})`;
-  }
-  // Decision logged at `log` level (not `debug`, which Chrome hides behind the
-  // Verbose filter) so a "bar missing" report can be confirmed straight from
-  // the default console.
-  console.log(
-    `[LMT] HUD ${hudEnabled.get() ? "SHOW" : "HIDE"} — ${reason}`,
-  );
-}
-
-/** Begin observing the settings that feed the gate, for this host. */
-export function initHudGate(host: string): () => void {
-  void storage.getItem<boolean>(AUTO_ENABLED_KEY).then((v) => {
-    autoEnabled = v ?? false;
-    recompute(host);
-  });
-  void storage.getItem<AutoScopeState>(AUTO_SCOPE_KEY).then((v) => {
-    scopeState = v ?? scopeState;
-    recompute(host);
-  });
-
-  const unwatchEnabled = storage.watch<boolean>(AUTO_ENABLED_KEY, (v) => {
-    autoEnabled = v ?? false;
-    recompute(host);
-  });
-  const unwatchScope = storage.watch<AutoScopeState>(AUTO_SCOPE_KEY, (v) => {
-    scopeState = v ?? scopeState;
-    recompute(host);
-  });
-  const unwatchDomains = storage.watch<Record<string, boolean>>(
-    AUTO_DOMAINS_KEY,
-    (domains) => {
-      scopeState = { scope: scopeState?.scope ?? "domain", domains: domains ?? {} };
-      recompute(host);
-    },
-  );
-
-  return () => {
-    unwatchEnabled?.();
-    unwatchScope?.();
-    unwatchDomains?.();
-  };
-}
-
-/** Per-tab manual toggle from the popup toolbar. */
-export function setManualHud(on: boolean, host: string): void {
-  manualHud = on;
-  recompute(host);
+/** No-op: the bar always shows regardless of the per-tab toggle. */
+export function setManualHud(_on: boolean): void {
+  // Intentionally empty — see module comment.
 }

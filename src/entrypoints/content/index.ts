@@ -205,15 +205,13 @@ export default defineContentScript({
       browser.runtime.getManifest().version_name ?? browser.runtime.getManifest().version,
     );
 
-    // HUD visibility gate: the pill + progress readout only render where
-    // translation is wanted (saved manga site, or a manual per-tab override
-    // from the popup). On every other tab — YouTube, WhatsApp, Google — the
-    // content script still loads but the HUD stays hidden. The settings
-    // sidebar (gear) is separate and shows everywhere as the manual entry
-    // point. `setManualHud` is called from the onMessage listener near the
-    // bottom of main().
+    // HUD visibility gate. Reverted to ALWAYS SHOW — the earlier attempt to
+    // hide the bar by auto-translate/whitelist state caused more problems than
+    // it solved (sites that are manga sites by adapter but not by whitelist
+    // never showing; bar/translation disagreeing per tab). The store is a
+    // constant true; the popup manual toggle is a no-op.
     ctx.onInvalidated(
-      initHudGate(window.location.hostname),
+      initHudGate(),
     );
 
     const translatedSrcMap = new Map<string, string>();
@@ -1254,11 +1252,11 @@ export default defineContentScript({
 
         return true;
       }
-      // Per-tab manual HUD toggle from the popup toolbar: show the pill +
-      // readout on this page even though it isn't a saved manga site. Not
-      // persisted — a temporary "translate this page now".
+      // Per-tab manual HUD toggle from the popup toolbar. The bar always shows
+      // now, so this is a no-op — kept so the popup control still works and
+      // the message contract is unchanged.
       if (msg.type === "LMT_SET_MANUAL_HUD") {
-        setManualHud(Boolean(msg.value), window.location.hostname);
+        setManualHud(Boolean(msg.value));
         sendResponse({ ok: true });
       }
     });
