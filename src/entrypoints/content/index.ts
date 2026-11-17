@@ -198,6 +198,13 @@ export default defineContentScript({
     // page that hangs on its first dispatch is still explained by the log.
     void installTimelineLogger();
 
+    // Version stamp so a stale reload is obvious from the extension logging —
+    // otherwise yesterday's build looks identical to the new one.
+    console.info(
+      "[LMT] loaded",
+      browser.runtime.getManifest().version_name ?? browser.runtime.getManifest().version,
+    );
+
     // HUD visibility gate: the pill + progress readout only render where
     // translation is wanted (saved manga site, or a manual per-tab override
     // from the popup). On every other tab — YouTube, WhatsApp, Google — the

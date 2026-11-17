@@ -44,6 +44,10 @@
   let seriesName = $state("Unknown Series");
   let ruleId = $state("");
 
+  // Build stamp (e.g. "1.0.5 (3e9058f)") so the loaded build is always
+  // identifiable — a stale reload otherwise looks identical to the new one.
+  let extVersion = "";
+
   // Pipeline & Models State
   let currentMode = $state(DefaultConfig.currentMode);
   let sourceLang = $state(DefaultConfig.sourceLang);
@@ -109,6 +113,12 @@
   );
 
   async function loadSettings() {
+    // Build stamp so the user can confirm which build is actually loaded.
+    try {
+      extVersion = browser.runtime.getManifest().version_name ?? browser.runtime.getManifest().version;
+    } catch {
+      extVersion = "";
+    }
     // ── Per-step timeouts: any individual storage round-trip must not be
     //    allowed to block popup paint indefinitely. A hung read falls through
     //    to defaults so the popup never sits on the BOOTING spinner.
@@ -836,6 +846,6 @@
       {/if}
       <span class="truncate">Hover an image to translate</span>
     </div>
-    <span class="text-[var(--text-muted)] truncate max-w-[120px]">{seriesName}</span>
+    <span class="text-[var(--text-muted)] truncate max-w-[120px]" title="Loaded build">{extVersion || seriesName}</span>
   </footer>
 </main>
