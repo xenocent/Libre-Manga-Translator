@@ -52,6 +52,33 @@ import { onDestroy } from "svelte";
     return () =>
       document.removeEventListener("lmt:queue-progress", onProgress);
   });
+
+  // Readout state. Collapsed it shows a self-explanatory summary + progress bar;
+  // hovering expands a labeled legend so the numbers are never bare. The old
+  // widget printed `active / (active+queued) / completed / detected` with no
+  // labels — `0/0/21/25` was unreadable.
+  let readoutHover = $state(false);
+  const qRunning = $derived(queue.active + queue.queued);
+  const qPct = $derived(
+    queue.detected > 0 ? Math.round((queue.completed / queue.detected) * 100) : 0,
+  );
+  const qAllDone = $derived(queue.detected > 0 && queue.completed >= queue.detected && qRunning === 0);
+
+  // One-line summary, chosen to read as a sentence fragment not a raw tuple.
+  const readoutSummary = $derived.by(() => {
+    if (qRunning > 0) {
+      const parts: string[] = [];
+      if (queue.active > 0) parts.push(`${queue.active} translating`);
+      if (queue.queued > 0) parts.push(`${queue.queued} queued`);
+      if (queue.detected > 0) parts.push(`${queue.completed}/${queue.detected} done`);
+      return parts.join(" · ");
+    }
+    if (queue.completed > 0 && queue.detected > 0) {
+      return `${queue.completed}/${queue.detected} translated`;
+    }
+    if (queue.detected > 0) return `${queue.detected} pages found`;
+    return "No pages yet";
+  });
   const manifestVersion = (browser.runtime.getManifest() as any).version_name || browser.runtime.getManifest().version;
 
   let currentMode = $state(DefaultConfig.currentMode);
@@ -430,16 +457,68 @@ import { onDestroy } from "svelte";
   }}
 >
   <div
-    class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl"
-    title={`${queue.active} translating · ${queue.queued} queued · ${queue.completed} of ${queue.detected} detected done and cached on this page`}
+    class="rounded-lg border border-[var(--border-line)] bg-[var(--surface-panel)] px-2 py-1 text-[11px] font-semibold tracking-wide text-[var(--text-muted)] shadow-xl transition-all"
+    onmouseenter={() => (readoutHover = true)}
+    onmouseleave={() => (readoutHover = false)}
+    aria-label={`Page progress: ${queue.completed} of ${queue.detected} translated, ${queue.active} translating, ${queue.queued} queued`}
   >
-    <span class="text-[var(--accent-cyan)]">{queue.active}</span>
-    <span> / </span>
-    <span>{queue.active + queue.queued}</span>
-    <span> / </span>
-    <span class="text-[var(--accent-amber)]">{queue.completed}</span>
-    <span class="text-[var(--text-dim)]"> / </span>
-    <span class="text-[var(--text-dim)]">{queue.detected}</span>
+    {#if readoutHover}
+      <!-- Expanded: labeled legend so no number is bare -->
+      <div class="flex flex-col gap-0.5 whitespace-nowrap">
+        <span class="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-0.5">Page progress</span>
+        <span class="flex items-center justify-between gap-3">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-[var(--accent-cyan)]"></span>
+            <span>Translating</span>
+          </span>
+          <span class="text-[var(--text-primary)] font-mono">{queue.active}</span>
+        </span>
+        <span class="flex items-center justify-between gap-3">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-[var(--accent-amber)]"></span>
+            <span>Queued</span>
+          </span>
+          <span class="text-[var(--text-primary)] font-mono">{queue.queued}</span>
+        </span>
+        <span class="flex items-center justify-between gap-3">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-[var(--accent-emerald)]"></span>
+            <span>Done</span>
+          </span>
+          <span class="text-[var(--text-primary)] font-mono">{queue.completed}</span>
+        </span>
+        <span class="flex items-center justify-between gap-3">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-[var(--text-dim)]"></span>
+            <span>Detected</span>
+          </span>
+          <span class="text-[var(--text-primary)] font-mono">{queue.detected}</span>
+        </span>
+      </div>
+    {:else}
+      <!-- Collapsed: sentence-fragment summary + progress bar -->
+      <div class="flex flex-col gap-1 min-w-[92px]">
+        <span
+          class="whitespace-nowrap {qAllDone
+            ? 'text-[var(--accent-emerald)]'
+            : qRunning > 0
+              ? 'text-[var(--text-primary)]'
+              : 'text-[var(--text-muted)]'}"
+        >
+          {readoutSummary}
+        </span>
+        {#if queue.detected > 0}
+          <div class="w-full h-[3px] rounded bg-[var(--border-line)] overflow-hidden">
+            <div
+              class="h-full rounded transition-all duration-300 {qAllDone
+                ? 'bg-[var(--accent-emerald)]'
+                : 'bg-[var(--accent-cyan)]'}"
+              style="width: {qPct}%"
+            ></div>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
   <button
     type="button"
