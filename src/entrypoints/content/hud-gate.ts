@@ -53,23 +53,27 @@ function hostAllowed(host: string): boolean {
 }
 
 function recompute(host: string): void {
+  let reason: string;
   if (manualHud) {
     hudEnabled.set(true);
-    return;
-  }
-  // A saved manga site: explicitly whitelisted under domain scope. Shows the
-  // pill even with auto-translate off so it's on the homepage.
-  if (scopeState.scope === "domain" && scopeState.domains[host] === true) {
+    reason = "manual toggle";
+  } else if (scopeState.scope === "domain" && scopeState.domains[host] === true) {
+    // A saved manga site: explicitly whitelisted under domain scope. Shows the
+    // pill even with auto-translate off so it's on the homepage.
     hudEnabled.set(true);
-    return;
-  }
-  // Auto-translate actively running and targeting this host. The `autoEnabled`
-  // factor is what keeps the HUD off on random tabs when auto-translate is off.
-  if (autoEnabled && hostAllowed(host)) {
+    reason = "saved/whitelisted site";
+  } else if (autoEnabled && hostAllowed(host)) {
+    // Auto-translate actively running and targeting this host. The `autoEnabled`
+    // factor is what keeps the HUD off on random tabs when auto-translate is off.
     hudEnabled.set(true);
-    return;
+    reason = "auto-translate on";
+  } else {
+    hudEnabled.set(false);
+    reason = `hidden (auto=${autoEnabled ? "on" : "off"}, scope=${scopeState.scope}${scopeState.scope === "domain" ? ", listed=" + (scopeState.domains[host] === true) : ""})`;
   }
-  hudEnabled.set(false);
+  // Decision is logged so a "gear still shows" / "bar missing" report can be
+  // confirmed straight from the console without guessing which branch fired.
+  console.debug(`[LMT] HUD ${reason}`);
 }
 
 /** Begin observing the settings that feed the gate, for this host. */
