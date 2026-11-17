@@ -37,7 +37,13 @@ const AUTO_DOMAINS_KEY = "sync:auto-translate-domains";
 export const hudEnabled = writable<boolean>(false);
 
 let autoEnabled = false;
-let scopeState: AutoScopeState = { scope: "global", domains: {} };
+// Default scope must MATCH the orchestrator (`auto-translate.ts`), which
+// defaults to "domain"/empty whitelist — a fresh install must not show the bar
+// on every tab, same reason it must not translate on every tab. Showing the
+// HUD implies translation is active there, so the gate and the orchestrator
+// must read the same default or they disagree and you get "bar everywhere" /
+// "bar nowhere" instability.
+let scopeState: AutoScopeState = { scope: "domain", domains: {} };
 let manualHud = false;
 
 /**
