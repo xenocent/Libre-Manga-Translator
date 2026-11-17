@@ -7,49 +7,82 @@
  * boolean both components subscribe to, so flipping it hides/shows the HUD
  * without unmounting.
  *
- * The value is recomputed from three inputs:
- *   • auto-translate enabled (sync) + host allowed (scope/domains) → allowed
- *   • host is a saved manga site (scope/domains even with auto-translate off)
- *   • the user manually turned the HUD on for THIS tab from the popup
+ * The user's rule, verbatim: the HUD is completely gone when auto-translate is
+ * OFF and the host is NOT whitelisted. It shows when the host is a saved manga
+ * site (rawkuma, manga-one, user-saved) or when auto-translate is actively
+ * running here. Plus a per-tab manual override from the popup.
+ *
+ * So the gate is: show iff
+ *   • manual override, OR
+ *   • the host is explicitly whitelisted (a saved site, shown even when
+ *     auto-translate is off so the pill is on the homepage), OR
+ *   • auto-translate is ON and targeting this host.
+ *
+ * Note we cannot just use `allowsHost`: with global scope it returns true for
+ * every host, which would reopen the HUD everywhere the moment scope is
+ * global — even with auto-translate off. Hence the explicit `autoEnabled`
+ * factor for the auto-translate branch.
  *
  * The manual flag lives in this tab's content-script instance (no storage) —
  * a per-tab temporary "translate this page now", not a saved setting.
  */
 
 import { writable } from "svelte/store";
-import { allowsHost, AUTO_SCOPE_KEY, type AutoScopeState } from "./auto-translate-scope";
+import { AUTO_SCOPE_KEY, type AutoScopeState } from "./auto-translate-scope";
 import { storage } from "#imports";
 
+const AUTO_ENABLED_KEY = "sync:auto-translate";
 const AUTO_DOMAINS_KEY = "sync:auto-translate-domains";
 
 export const hudEnabled = writable<boolean>(false);
 
+let autoEnabled = false;
 let scopeState: AutoScopeState | null = null;
 let manualHud = false;
 
 function recompute(host: string): void {
-  // Manual per-tab override wins outright.
   if (manualHud) {
     hudEnabled.set(true);
     return;
   }
-  // Saved manga site (rawkuma, manga-one, user-saved): pill shows on the
-  // homepage even with auto-translate off. `allowsHost` is false for an
-  // ordinary domain-scoped empty set, so random tabs stay gated off.
-  if (scopeState && allowsHost(scopeState, host)) {
+  // A saved manga site: explicitly whitelisted under domain scope. Shows the
+  // pill even with auto-translate off so it's on the homepage.
+  if (
+    scopeState?.scope === "domain" &&
+    scopeState.domains[host] === true
+  ) {
+    hudEnabled.set(true);
+    return;
+  }
+  // Auto-translate actively running and targeting this host (global scope, or
+  // domain scope with this host listed). Requires autoEnabled so a global
+  // scope with auto-translate OFF still stays hidden.
+  if (autoEnabled && scopeState && scopeState.domains[host] === true) {
+    hudEnabled.set(true);
+    return;
+  }
+  if (autoEnabled && scopeState?.scope === "global") {
     hudEnabled.set(true);
     return;
   }
   hudEnabled.set(false);
 }
 
-/** Begin observing the scope settings that feed the gate, for this host. */
+/** Begin observing the settings that feed the gate, for this host. */
 export function initHudGate(host: string): () => void {
+  void storage.getItem<boolean>(AUTO_ENABLED_KEY).then((v) => {
+    autoEnabled = v ?? false;
+    recompute(host);
+  });
   void storage.getItem<AutoScopeState>(AUTO_SCOPE_KEY).then((v) => {
     scopeState = v ?? scopeState;
     recompute(host);
   });
 
+  const unwatchEnabled = storage.watch<boolean>(AUTO_ENABLED_KEY, (v) => {
+    autoEnabled = v ?? false;
+    recompute(host);
+  });
   const unwatchScope = storage.watch<AutoScopeState>(AUTO_SCOPE_KEY, (v) => {
     scopeState = v ?? scopeState;
     recompute(host);
@@ -63,6 +96,7 @@ export function initHudGate(host: string): () => void {
   );
 
   return () => {
+    unwatchEnabled?.();
     unwatchScope?.();
     unwatchDomains?.();
   };
