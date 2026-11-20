@@ -131,3 +131,58 @@ describe("no guard is fed an already-derived key", () => {
     }
   });
 });
+
+describe("doneCount — live vs cache-restored", () => {
+  it("counts from liveDoneSrcs, not from the full bySrc map", async () => {
+    // doneCount() used to filter bySrc for "done" entries, which included
+    // cache-restored pages (loaded from storage, not translated this session).
+    // A chapter restoring 15 cached pages + translating 2 live showed "17/17"
+    // — hiding the 2 real pages the user watched translate.
+    const registry = await read("src/entrypoints/content/translation-registry.ts");
+    // doneCount must return the size of the dedicated live set, not filter bySrc.
+    expect(registry).toMatch(
+      /export function doneCount\(\): number \{\s*return liveDoneSrcs\.size;/,
+    );
+    // liveDoneSrcs must exist as a dedicated Set.
+    expect(registry).toContain("const liveDoneSrcs = new Set<string>();");
+  });
+
+  it("exposes markLiveDone as a distinct entry point", async () => {
+    const registry = await read("src/entrypoints/content/translation-registry.ts");
+    expect(registry).toContain("export function markLiveDone(src: string): void {");
+    // markLiveDone adds to the live set only — it must not also call markDone.
+    expect(registry).toMatch(
+      /export function markLiveDone\(src: string\): void \{\s*liveDoneSrcs\.add\(srcKeyOf\(src\)\);/,
+    );
+  });
+
+  it("Overlay live success path calls both markDone and markLiveDone", async () => {
+    const overlay = await read("src/lib/components/Overlay.svelte");
+    // The live success path (executeTranslation → renderTranslations → done)
+    // must report both: markDone for the registry done-state guard, and
+    // markLiveDone for the honest "how many did we translate now" counter.
+    expect(overlay).toContain("Registry.markLiveDone(");
+  });
+
+  it("Overlay cache-restore path does NOT call markLiveDone", async () => {
+    const overlay = await read("src/lib/components/Overlay.svelte");
+    // Cache-restored pages are translated in a previous session — the user
+    // is not watching them now. markLiveDone must not be called from the
+    // restore path or doneCount() over-counts.
+    // Find the cache-restore function and assert markLiveDone is absent inside it.
+    const restoreFn = overlay.match(
+      /(?:async\s+)?function\s+(?:handleCacheRestore|restoreFromCache|applyCache)\w*\([\s\S]*?\n\}/,
+    );
+    // If no named restore function is found, fall back to a looser check:
+    // count markLiveDone calls and assert they appear fewer times than markDone.
+    if (restoreFn) {
+      expect(restoreFn[0]).not.toContain("markLiveDone");
+    } else {
+      const liveCount = (overlay.match(/markLiveDone\(/g) ?? []).length;
+      const doneCountCalls = (overlay.match(/(?<!Live)\bmarkDone\(/g) ?? []).length;
+      // At least one markDone call that is NOT paired with markLiveDone —
+      // that is the cache-restore call.
+      expect(doneCountCalls).toBeGreaterThan(liveCount);
+    }
+  });
+});
