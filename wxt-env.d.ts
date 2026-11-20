@@ -85,6 +85,18 @@ interface TranslationDiagnostics {
   padded?: boolean;
   /** True when `finishReason` says the provider hit its output cap. */
   truncated?: boolean;
+  /**
+   * Observability (plan-debug-observability): the raw HTTP request/response the
+   * API backend captured for this page, so a proxy/schema mismatch is
+   * diagnosable from the export. Carried through `mergeRunInfo` from the last
+   * round-trip; secrets are scrubbed by the writer.
+   */
+  rawRequest?: {
+    url: string;
+    body?: string;
+    status?: number;
+    response?: string;
+  };
 }
 
 interface TranslateResult {
@@ -92,6 +104,24 @@ interface TranslateResult {
   sourceTexts?: string[];
   context?: { summary: string; dictionary: string };
   diagnostics?: TranslationDiagnostics;
+}
+
+/**
+ * Per-stage diagnostic payload carried in `DebugEntry.stages`. Observability
+ * only — captured by the offscreen pipeline so a failed page names the stage
+ * that broke and carries raw request/response detail for cloud backends.
+ */
+interface DebugStageInfo {
+  /** Wall-clock ms the stage took; present even when the stage failed. */
+  ms?: number;
+  /** The stage-local error message, distinct from the top-level `error`. */
+  error?: string;
+  /**
+   * Stage-specific detail. For translate: raw request URL + truncated body and
+   * response status + truncated body. For OCR: per-line text + confidence.
+   * For inpaint: method chosen + per-box decisions. Truncated by the writer.
+   */
+  detail?: Record<string, unknown>;
 }
 
 interface DebugEntry {
@@ -174,6 +204,24 @@ interface DebugEntry {
     llm?: string;
     server?: string;
   };
+  /**
+   * Per-stage diagnostic detail. Observability only — never affects inference.
+   * Populated by the offscreen pipeline on BOTH success and failure so a failed
+   * page still names the stage that broke and the raw error at that stage.
+   */
+  stages?: {
+    detect?: DebugStageInfo;
+    ocr?: DebugStageInfo;
+    translate?: DebugStageInfo;
+    inpaint?: DebugStageInfo;
+  };
+  /**
+   * The transit timeline text for this page (from `@/lib/debug/timeline`), folded
+   * into the entry so the exported `.json` carries the intermediate transitions
+   * a finished-page summary misses. Capped by the writer so the export stays
+   * openable for a full chapter.
+   */
+  timeline?: string;
   error?: string;
 }
 

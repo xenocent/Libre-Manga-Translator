@@ -104,6 +104,60 @@ function stageName(type: unknown): string {
 }
 
 /**
+ * Per-stage timing + error accumulator, attached to the DebugEntry as
+ * `stages` (observability only — never changes inference).
+ *
+ * The job internally runs several stages (detect / ocr / translate / inpaint),
+ * but a bare `timing` object only survives the SUCCESS return path. When a
+ * stage throws, the timing was abandoned and the export showed nothing about
+ * where it broke. This tracker records each stage's duration and, on failure,
+ * the stage-local error, so a timed-out page still shows how far it got.
+ *
+ * `detail` is truncated by the writers so the export stays openable.
+ */
+interface StageRun {
+  ms?: number;
+  error?: string;
+  detail?: Record<string, unknown>;
+}
+
+type StageKey = "detect" | "ocr" | "translate" | "inpaint";
+
+function createStageTracker() {
+  const stages: Partial<Record<StageKey, StageRun>> = {};
+  return {
+    stages,
+    /** Wraps one stage's promise, recording its duration and any error. */
+    async run<T>(key: StageKey, fn: () => Promise<T>): Promise<T> {
+      const entry: StageRun = {};
+      stages[key] = entry;
+      const t0 = performance.now();
+      try {
+        const result = await fn();
+        entry.ms = performance.now() - t0;
+        return result;
+      } catch (err) {
+        entry.ms = performance.now() - t0;
+        entry.error = (err as Error)?.message ?? String(err);
+        // A failed translate round-trip carries its raw req/resp on the error's
+        // diagnostics (LMT-032 / plan §2). Pull it into the stage detail so the
+        // export shows the proxy/schema mismatch that caused the throw.
+        const run = diagnosticsFromError(err);
+        if (run?.rawRequest) {
+          entry.detail = { rawRequest: run.rawRequest };
+        }
+        throw err;
+      }
+    },
+  };
+}
+
+/** Truncate a string for storage so the export stays openable (plan §6). */
+function trunc(s: string, max = 1000): string {
+  return s.length > max ? `${s.slice(0, max)}…(+${s.length - max})` : s;
+}
+
+/**
  * `fetch` and WebLLM reject with their own generic abort text ("The user
  * aborted a request"), which drops the stage name. When the deadline is what
  * fired, rewrite the error so the user sees the same "Timed out after Ns:
@@ -254,6 +308,13 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     };
 
     /**
+     * Per-job stage tracker: records detect/ocr/translate/inpaint timing and,
+     * on failure, the stage-local error, so the DebugEntry `stages` field shows
+     * how far a failed page got (plan §2). Attached to BOTH responses below.
+     */
+    const tracker = createStageTracker();
+
+    /**
      * Runs one translate branch under the forwarded deadline and replies with
      * exactly one response. The signal reaches the backend that owns the
      * request, so the deadline actually closes the socket / interrupts
@@ -264,12 +325,18 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
       task: (signal?: AbortSignal) => Promise<unknown>,
     ) => {
       const deadline = jobDeadline(msg.timeoutMs, stage);
+      const withStages = (res: Record<string, unknown>) => ({
+        ...res,
+        stages: { ...tracker.stages },
+      });
       task(deadline.signal)
-        .then(sendResponse)
+        .then((res) => sendResponse(withStages(res as Record<string, unknown>)))
         .catch((err) =>
           sendResponse(
-            errorResponse(
-              timedOutError(err, deadline.signal, msg.timeoutMs, stage),
+            withStages(
+              errorResponse(
+                timedOutError(err, deadline.signal, msg.timeoutMs, stage),
+              ) as Record<string, unknown>,
             ),
           ),
         )
@@ -360,22 +427,21 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
         await yieldToMain();
         const blocked = await localLlmBlocked();
         if (blocked) return blocked;
-        const tOcr = performance.now();
-        const ocrOut = await textRecognise(
-          src,
-          bboxes,
-          sourceLang,
-          ocrMinConfidence,
-          undefined,
-          undefined,
-          gateOptions,
-          ocrEngine,
-          signal,
+        const ocrOut = await tracker.run("ocr", () =>
+          textRecognise(
+            src,
+            bboxes,
+            sourceLang,
+            ocrMinConfidence,
+            undefined,
+            undefined,
+            gateOptions,
+            ocrEngine,
+            signal,
+          ),
         );
         const ocrResults = ocrOut.results;
-        const ocr = performance.now() - tOcr;
         await yieldToMain();
-        const tTrans = performance.now();
         const backend = await detectBackend();
         if (backend === "wasm") {
           return {
@@ -383,80 +449,82 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
               "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
           };
         }
-        const res = await translateLocal(
-          ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
-          targetLang,
-          sourceLang,
-          seriesContext,
-          llmModel,
-          llmTemperature,
-          // Auto-Detect: tell the LLM which script the OCR gate settled on
-          // instead of letting it guess the input language (LMT-030).
-          ocrOut.gate?.label || undefined,
-          signal,
+        const res = await tracker.run("translate", () =>
+          translateLocal(
+            ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
+            targetLang,
+            sourceLang,
+            seriesContext,
+            llmModel,
+            llmTemperature,
+            // Auto-Detect: tell the LLM which script the OCR gate settled on
+            // instead of letting it guess the input language (LMT-030).
+            ocrOut.gate?.label || undefined,
+            signal,
+          ),
         );
         return {
           ...res,
           sourceTexts: ocrResults.map((r) => r.text),
           gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
           gate: ocrOut.gate,
-          timing: { ocr, translate: performance.now() - tTrans },
           backend,
         };
       });
     } else if (currentMode === "api") {
       runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
-        const tOcr = performance.now();
-        const ocrOut = await textRecognise(
-          src,
-          bboxes,
-          sourceLang,
-          ocrMinConfidence,
-          undefined,
-          undefined,
-          gateOptions,
-          ocrEngine,
-          signal,
+        const ocrOut = await tracker.run("ocr", () =>
+          textRecognise(
+            src,
+            bboxes,
+            sourceLang,
+            ocrMinConfidence,
+            undefined,
+            undefined,
+            gateOptions,
+            ocrEngine,
+            signal,
+          ),
         );
-        const ocr = performance.now() - tOcr;
-        await yieldToMain();
-        const tTrans = performance.now();
         const ocrResults = ocrOut.results;
-        const res = await translateWithServer(
-          ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
-          targetLang,
-          sourceLang,
-          seriesContext,
-          serverConfig(msg.config),
-          // Auto-Detect: the prompt names the script the gate settled on
-          // instead of omitting the source language entirely (LMT-030).
-          ocrOut.gate?.label || undefined,
-          signal,
+        await yieldToMain();
+        const res = await tracker.run("translate", () =>
+          translateWithServer(
+            ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
+            targetLang,
+            sourceLang,
+            seriesContext,
+            serverConfig(msg.config),
+            // Auto-Detect: the prompt names the script the gate settled on
+            // instead of omitting the source language entirely (LMT-030).
+            ocrOut.gate?.label || undefined,
+            signal,
+          ),
         );
         return {
           ...res,
           sourceTexts: ocrResults.map((r) => r.text),
           gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
           gate: ocrOut.gate,
-          timing: { ocr, translate: performance.now() - tTrans },
         };
       });
     } else {
       runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
-        const tTrans = performance.now();
-        const res = await translateWithGemini(
-          src,
-          bboxes,
-          geminiKey,
-          targetLang,
-          sourceLang,
-          seriesContext,
-          geminiModel,
-          llmTemperature,
-          undefined,
-          signal,
+        const res = await tracker.run("translate", () =>
+          translateWithGemini(
+            src,
+            bboxes,
+            geminiKey,
+            targetLang,
+            sourceLang,
+            seriesContext,
+            geminiModel,
+            llmTemperature,
+            undefined,
+            signal,
+          ),
         );
         // Match the webgpu/api response contract so content debug + cache
         // never see undefined sourceTexts/gate/timing on the Gemini path
@@ -466,7 +534,6 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           sourceTexts: res.sourceTexts ?? new Array(bboxes.length).fill(""),
           gateSkip: new Array(bboxes.length).fill(null),
           gate: { mode: "off", checked: 0, skipped: 0, unavailable: false },
-          timing: { translate: performance.now() - tTrans },
           backend: await detectBackend(),
         };
       });

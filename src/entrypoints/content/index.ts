@@ -59,6 +59,28 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
   };
 }
 
+/**
+ * Merge the raw HTTP request/response the backend captured (plan
+ * debug-observability) into the translate stage's detail. The offscreen tracker
+ * records `ms`/`error`; this folds in the `rawRequest` (present for cloud
+ * backends on both success and failure). Secrets are never stored here — the
+ * request body is the JSON payload; the Authorization header is not captured.
+ */
+function mergeTranslateStageDetail(
+  translateStage: DebugStageInfo | undefined,
+  rawRequest: TranslationDiagnostics["rawRequest"],
+): { translate: DebugStageInfo } | Record<string, never> {
+  if (!rawRequest) {
+    return translateStage ? { translate: translateStage } : {};
+  }
+  return {
+    translate: {
+      ...translateStage,
+      detail: { ...translateStage?.detail, rawRequest },
+    },
+  };
+}
+
 // Wait until the image has a real layout (loaded + non-zero rendered box).
 // Measuring a hidden/not-yet-loaded image freezes the wrapper at 0×0 and
 // misplaces the whole overlay on revisit.
@@ -728,6 +750,21 @@ export default defineContentScript({
                         // these onto the error and the offscreen relay forwards
                         // them (LMT-032).
                         ...runDiagnosticFields(resp.diagnostics),
+                        // Per-stage timing + errors from the offscreen tracker,
+                        // so a failed page names the stage that broke (plan §2).
+                        // Fold the raw req/resp the backend captured into the
+                        // translate stage detail (API/Gemini only; Local has none).
+                        ...(resp.stages || resp.diagnostics?.rawRequest
+                          ? {
+                              stages: {
+                                ...resp.stages,
+                                ...mergeTranslateStageDetail(
+                                  resp.stages?.translate,
+                                  resp.diagnostics?.rawRequest,
+                                ),
+                              },
+                            }
+                          : {}),
                         error: resp.error,
                       })
 
@@ -794,6 +831,19 @@ export default defineContentScript({
                       untranslated: diagnostics?.untranslated,
                       ...runDiagnosticFields(diagnostics),
                     timing,
+                    // Per-stage detail from the offscreen tracker, merged with
+                    // the raw req/resp the backend captured (plan §2).
+                    ...(resp.stages || diagnostics?.rawRequest
+                      ? {
+                          stages: {
+                            ...resp.stages,
+                            ...mergeTranslateStageDetail(
+                              resp.stages?.translate,
+                              diagnostics?.rawRequest,
+                            ),
+                          },
+                        }
+                      : {}),
                     ocrMinConfidence: debugCtx.ocrMinConfidence,
                     detectionMinConfidence: debugCtx.detectionMinConfidence,
                     temperature: debugCtx.temperature,

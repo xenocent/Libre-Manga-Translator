@@ -106,6 +106,11 @@ export function delayUnlessAborted(ms: number, signal?: AbortSignal): Promise<bo
   });
 }
 
+/** Truncate a string for the debug export so it stays openable (plan §6). */
+function trunc(s: string, max = 1000): string {
+  return s.length > max ? `${s.slice(0, max)}…(+${s.length - max})` : s;
+}
+
 async function requestOnce(
   systemPrompt: string,
   userPrompt: string,
@@ -157,6 +162,12 @@ async function requestOnce(
     headers["Authorization"] = `Bearer ${config.serverApiKey}`;
   }
 
+  // Observability (plan-debug-observability): capture the raw request/response
+  // so a proxy/schema mismatch is diagnosable from the export. The request body
+  // is the JSON payload — it never contains the API key (that lives in the
+  // Authorization header, which is deliberately NOT captured).
+  const rawRequestBody = trunc(String(JSON.stringify(body)), 1000);
+
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -166,10 +177,21 @@ async function requestOnce(
     });
 
     if (!response.ok) {
-      const err = new Error(
-        `API ${response.status}: ${(await response.text()).substring(0, 500)}`,
-      ) as Error & { status?: number };
+      const errText = await response.text();
+      let err: Error & { status?: number } = new Error(
+        `API ${response.status}: ${errText.substring(0, 500)}`,
+      );
       err.status = response.status;
+      // Attach the raw req/resp so a proxy error page / schema mismatch is
+      // visible in the export even when the request failed outright.
+      err = attachDiagnostics(err, {
+        rawRequest: {
+          url,
+          body: rawRequestBody,
+          status: response.status,
+          response: trunc(errText, 1000),
+        },
+      }) as Error & { status?: number };
       throw err;
     }
 
@@ -196,6 +218,12 @@ async function requestOnce(
         typeof finishReason === "string" ? finishReason : undefined,
       promptChars: promptChars(systemPrompt, userPrompt),
       usage: normalizeOpenAICompatibleUsage(data),
+      rawRequest: {
+        url,
+        body: rawRequestBody,
+        status: response.status,
+        response: trunc(JSON.stringify(data), 1000),
+      },
     };
 
     try {

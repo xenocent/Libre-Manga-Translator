@@ -114,8 +114,33 @@
     setTimeout(() => (copiedId = null), 2000);
   }
 
-  function handleExport() {
-    const blob = new Blob([JSON.stringify(logs, null, 2)], {
+  async function handleExport() {
+    // One export = the whole story (plan-debug-observability): the per-page
+    // entries plus the transit timeline text (intermediate stage transitions a
+    // finished-page summary misses). The timeline lives in `local:` storage,
+    // shared with the content script, so the popup can read it directly. A page
+    // can write a large buffer, so cap it to keep the file openable.
+    const TIMELINE_STORAGE_KEY = "local:debug-timeline";
+    const TIMELINE_CAP_CHARS = 100_000;
+    let timeline: string | undefined;
+    try {
+      const text = await storage.getItem<string>(TIMELINE_STORAGE_KEY);
+      if (text) {
+        timeline =
+          text.length > TIMELINE_CAP_CHARS
+            ? `${text.slice(0, TIMELINE_CAP_CHARS)}\n…[${text.length - TIMELINE_CAP_CHARS} chars cut]`
+            : text;
+      }
+    } catch {
+      // Timeline is best-effort; the per-page entries are still exported.
+    }
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      ...(timeline ? { timeline } : {}),
+      entries: logs,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);

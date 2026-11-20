@@ -96,6 +96,21 @@ export interface LlmRunInfo {
   llmCalls?: number;
   /** Token counts reported by the provider; omitted fields remain unknown. */
   usage?: ProviderTokenUsage;
+  /**
+   * Observability (plan-debug-observability): the raw HTTP request/response for
+   * this round-trip, so a proxy/schema mismatch (e.g. a 9router returning a
+   * different shape) is diagnosable from the export. Secrets (Authorization
+   * header, API key) are scrubbed by the writer — never store the key.
+   */
+  rawRequest?: {
+    url: string;
+    /** Truncated request body (JSON string). */
+    body?: string;
+    /** HTTP status, when a response was received. */
+    status?: number;
+    /** Truncated response body; present on both success and error. */
+    response?: string;
+  };
 }
 
 /** Raw answers are capped before they reach storage: 50 debug entries × a
@@ -149,6 +164,9 @@ export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
     promptChars: calls[0].promptChars,
     llmCalls: calls.length,
     ...(usage ? { usage } : {}),
+    // Raw req/resp of the last round-trip (plan-debug-observability): the export
+    // shows the exact HTTP exchange, including a proxy/schema mismatch.
+    ...(last.rawRequest ? { rawRequest: last.rawRequest } : {}),
   };
 }
 
